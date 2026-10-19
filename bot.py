@@ -11,7 +11,10 @@ import socket
 import gc
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
+from datetime import datetime, timedelta
+
+# --- REGISTRO DO TEMPO DE INÍCIO DA APLICAÇÃO ---
+TEMPO_INICIAL_BOT = time.time()
 
 # --- SERVIDOR HTTP KEEP-ALIVE PARA O RENDER ---
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -124,7 +127,6 @@ def carregar_clientes():
         return {doc["_id"]: doc for doc in docs}
     except Exception as e:
         print(f"ERRO LER CLIENTES: {e}")
-        return {}
 
 def salvar_clientes(clientes):
     try:
@@ -333,11 +335,11 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
             raise ApplicationHandlerStop
 
         if uid == dono_id: return
-        COMANDOS_LIBERADOS = ['/start', '/suporte', '/suport', '/meu_id', '/block', '/desbloquear', '/div', '/div2', '/menu']
+        COMANDOS_LIBERADOS = ['/start', '/suporte', '/suport', '/meu_id', '/block', '/desbloquear', '/div', '/div2', '/menu', '/ping', '/pin']
         if update.message and update.message.text and update.message.text.startswith('/'):
             cmd = update.message.text.split()[0].split('@')[0].lower()
             if cmd in COMANDOS_LIBERADOS:
-                if cmd in ['/div', '/div2', '/menu']:
+                if cmd in ['/div', '/div2', '/menu', '/ping', '/pin']:
                     raise ApplicationHandlerStop
                 
                 if uid not in ULTIMO_COMANDO: ULTIMO_COMANDO[uid] = {}
@@ -366,6 +368,40 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
 
         mid = random.choice(lista_midias) if lista_midias else None
         await enviar_midia(update.message, update.effective_chat.id, mid, mensagem_inicial, InlineKeyboardMarkup(kb))
+
+    async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        inicio = time.time()
+        msg = await update.message.reply_text("🏓 Calculando ping...")
+        fim = time.time()
+        latencia = int((fim - inicio) * 1000)
+        await msg.edit_text(f"🏓 **PONG!**\n⚡ Latência: **{latencia}ms**")
+
+    async def pin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        
+        agora = time.time()
+        tempo_ligado_seg = agora - TEMPO_INICIAL_BOT
+        
+        horas_ligado = int(tempo_ligado_seg // 3600)
+        minutos_ligado = int((tempo_ligado_seg % 3600) // 60)
+        
+        # Limite total do Render gratuito: 750 horas por mês
+        horas_totais_render = 750
+        horas_restantes = max(0, horas_totais_render - (tempo_ligado_seg / 3600))
+        
+        # Data/Hora aproximada em que as 750 horas se esgotam a partir do início
+        data_desligamento = datetime.now(FUSO_RJ) + timedelta(seconds=(750 * 3600 - tempo_ligado_seg))
+        data_desligamento_str = data_desligamento.strftime("%d/%m/%Y às %H:%M")
+
+        texto = (
+            f"📊 **STATUS DE EXECUÇÃO (RENDER)**\n\n"
+            f"⏱️ **Tempo ligado:** {horas_ligado}h {minutos_ligado}m\n"
+            f"⏳ **Quota mensal Render:** {horas_totais_render}h (Plano Gratuito)\n"
+            f"📉 **Horas restantes do plano:** ~{horas_restantes:.1f}h\n"
+            f"🛑 **Previsão de término da quota:** {data_desligamento_str}"
+        )
+        await update.message.reply_text(texto, parse_mode="Markdown")
 
     async def div_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
@@ -454,6 +490,8 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
             "• /block [ID] — Bloqueia usuário.\n"
             "• /desbloquear [ID] — Desbloqueia usuário.\n\n"
             "🛠️ Utilitários:\n"
+            "• /ping — Mostra a latência do bot.\n"
+            "• /pin — Mostra o tempo ligado e quota do Render.\n"
             "• /pegarid — Copia o file_id de uma mídia.\n"
             "• /meu_id — Mostra seu ID.\n"
             "• /suporte — Contato de suporte.\n"
@@ -793,6 +831,8 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         app.add_handler(TypeHandler(Update, interceptar), group=-1)
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), log_mensagens), group=0)
         app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("ping", ping_cmd))
+        app.add_handler(CommandHandler("pin", pin_cmd))
         app.add_handler(CommandHandler("meu_id", meu_id_cmd))
         app.add_handler(CommandHandler("suporte", suporte_cmd))
         app.add_handler(CommandHandler("suport", suporte_cmd))
