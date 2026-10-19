@@ -778,8 +778,13 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
                     [InlineKeyboardButton("⬅️ Voltar", callback_data="voltar")]
                 ]
                 msg = await q.message.reply_text(
-                    f"✅ PIX GERADO!\n\n💰 Valor: R$ {v:.2f}\n📋 Código Pix:\n{qr}\n\n⏰ Pague em até 10 minutos!",
-                    reply_markup=InlineKeyboardMarkup(kb)
+                    f"✅ **PIX GERADO COM SUCESSO!**\n\n"
+                    f"💰 **Valor:** R$ {v:.2f}\n"
+                    f"📋 **Código Pix Copia e Cola:**\n"
+                    f"```\n{qr}\n```\n"
+                    f"⏰ Pague em até 10 minutos!",
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode="Markdown"
                 )
                 msgs_para_apagar[uid] = msg.message_id
                 log(nome_bot, "USUARIO", f"PIX gerado — User:{uid} Valor:R${v} PID:{pid}")
