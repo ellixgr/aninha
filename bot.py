@@ -13,9 +13,6 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 
-# --- REGISTRO DO TEMPO DE INÍCIO DA APLICAÇÃO ---
-TEMPO_INICIAL_BOT = time.time()
-
 # --- SERVIDOR HTTP KEEP-ALIVE PARA O RENDER ---
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -75,6 +72,7 @@ try:
     db = mongo_client.get_database("bot_database")
     colecao_clientes = db["clientes"]
     colecao_bloqueados = db["bloqueados"]
+    colecao_sistema = db["sistema_render"]
     print("✅ Conectado ao MongoDB com sucesso!")
 except Exception as e:
     print(f"❌ ERRO ao conectar no MongoDB: {e}")
@@ -208,6 +206,42 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
     TEMPO_BLOQUEIO_FLOD = 600
     msgs_para_apagar = {}
     
+    # Variáveis de controle de uptime persistente
+    tempo_inicio_Sessao = time.time()
+    mes_atual_str = datetime.now(FUSO_RJ).strftime("%m-%Y")
+
+    def obter_tempo_total_ligado():
+        try:
+            agora = time.time()
+            sessao_atual = agora - tempo_inicio_Sessao
+            
+            dados_db = colecao_sistema.find_one({"_id": "controle_uptime"})
+            mes_registrado = dados_db.get("mes", mes_atual_str) if dados_db else mes_atual_str
+            
+            # Se mudou o mês (virou o mês 1º), reseta o acumulado
+            if mes_registrado != mes_atual_str:
+                acumulado_anterior = 0
+                colecao_sistema.update_one(
+                    {"_id": "controle_uptime"},
+                    {"$set": {"acumulado_segundos": 0, "mes": mes_atual_str}},
+                    upsert=True
+                )
+            else:
+                acumulado_anterior = dados_db.get("acumulado_segundos", 0) if dados_db else 0
+
+            total_segundos = acumulado_anterior + sessao_atual
+            
+            # Salva de volta atualizado
+            colecao_sistema.update_one(
+                {"_id": "controle_uptime"},
+                {"$set": {"acumulado_segundos": total_segundos, "mes": mes_atual_str, "ultimo_salvamento": agora}},
+                upsert=True
+            )
+            return total_segundos
+        except Exception as e:
+            print(f"Erro ao calcular tempo ligado no DB: {e}")
+            return time.time() - tempo_inicio_Sessao
+
     try:
         tmp_app = ApplicationBuilder().token(token).build()
         await tmp_app.initialize()
@@ -380,23 +414,23 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
     async def pin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
         
-        agora = time.time()
-        tempo_ligado_seg = agora - TEMPO_INICIAL_BOT
+        total_segundos = obter_tempo_total_ligado()
         
-        horas_ligado = int(tempo_ligado_seg // 3600)
-        minutos_ligado = int((tempo_ligado_seg % 3600) // 60)
+        horas_ligado = int(total_segundos // 3600)
+        minutos_ligado = int((total_segundos % 3600) // 60)
         
         # Limite total do Render gratuito: 750 horas por mês
         horas_totais_render = 750
-        horas_restantes = max(0, horas_totais_render - (tempo_ligado_seg / 3600))
+        horas_usadas = total_segundos / 3600
+        horas_restantes = max(0, horas_totais_render - horas_usadas)
         
-        # Data/Hora aproximada em que as 750 horas se esgotam a partir do início
-        data_desligamento = datetime.now(FUSO_RJ) + timedelta(seconds=(750 * 3600 - tempo_ligado_seg))
+        # Data/Hora aproximada em que as 750 horas se esgotam
+        data_desligamento = datetime.now(FUSO_RJ) + timedelta(seconds=(750 * 3600 - total_segundos))
         data_desligamento_str = data_desligamento.strftime("%d/%m/%Y às %H:%M")
 
         texto = (
             f"📊 **STATUS DE EXECUÇÃO (RENDER)**\n\n"
-            f"⏱️ **Tempo ligado:** {horas_ligado}h {minutos_ligado}m\n"
+            f"⏱️ **Tempo acumulado no mês:** {horas_ligado}h {minutos_ligado}m\n"
             f"⏳ **Quota mensal Render:** {horas_totais_render}h (Plano Gratuito)\n"
             f"📉 **Horas restantes do plano:** ~{horas_restantes:.1f}h\n"
             f"🛑 **Previsão de término da quota:** {data_desligamento_str}"
@@ -491,7 +525,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
             "• /desbloquear [ID] — Desbloqueia usuário.\n\n"
             "🛠️ Utilitários:\n"
             "• /ping — Mostra a latência do bot.\n"
-            "• /pin — Mostra o tempo ligado e quota do Render.\n"
+            "• /pin — Mostra o tempo acumulado e quota do Render.\n"
             "• /pegarid — Copia o file_id de uma mídia.\n"
             "• /meu_id — Mostra seu ID.\n"
             "• /suporte — Contato de suporte.\n"
@@ -811,6 +845,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         while True:
             verificar_wifi()
             try:
+                obter_tempo_total_ligado() # Atualiza o tempo acumulado no MongoDB periodicamente
                 await expurgar_expirados(app.bot)
             except Exception as e:
                 log(nome_bot, "ERRO", f"Erro no loop: {e}")
@@ -856,6 +891,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         
         if is_principal:
             try:
+                obter_tempo_total_ligado()
                 await expurgar_expirados(app.bot)
             except Exception as e:
                 log(nome_bot, "ERRO", f"Erro inicial: {e}")
