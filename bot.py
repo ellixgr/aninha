@@ -20,6 +20,10 @@ class SimpleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is active and running!")
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
 def run_keep_alive_server():
     port = int(os.getenv("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), SimpleHandler)
@@ -27,6 +31,7 @@ def run_keep_alive_server():
 
 # Iniciar o servidor web em segundo plano para manter o Render acordado
 threading.Thread(target=run_keep_alive_server, daemon=True).start()
+
 
 # --- CONFIGURAÇÃO DE DNS PARA O MONGODB ---
 RESOLV_CONF = "/etc/resolv.conf"
