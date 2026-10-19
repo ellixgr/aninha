@@ -1,582 +1,851 @@
+#!/usr/bin/env python3
+import asyncio
 import os
+import sys
 import uuid
 import time
-import asyncio
-import requests
-import threading
 import random
-import re
-from datetime import datetime, timezone, timedelta
-from flask import Flask
-from pymongo import MongoClient
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    TypeHandler,
-    ContextTypes,
-    ApplicationHandlerStop,
-    ChatMemberHandler
-)
+import requests
+import json
+import socket
+import gc
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime
 
-app_web = Flask(__name__)
+# --- SERVIDOR HTTP KEEP-ALIVE PARA O RENDER ---
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is active and running!")
 
-@app_web.route('/')
-def home():
-    return "SanizinhaBot está online!"
+def run_keep_alive_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    server.serve_forever()
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app_web.run(host="0.0.0.0", port=port)
+# Iniciar o servidor web em segundo plano para manter o Render acordado
+threading.Thread(target=run_keep_alive_server, daemon=True).start()
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-MP_ACCESS_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
-DONO_ID = int(os.environ.get("DONO_ID", 0))
-CANAL_ALVO_ID = int(os.environ.get("CANAL_ALVO_ID", 0))
-
-MONGO_URI = os.environ.get("MONGO_URI")
-
-
-LISTA_VIDEOS_START = [
-    "BAACAgEAAxkBAAMKanvd-2rf4BeJhsokFDuwcFwXK2EAAj0IAALXHuFH56allQhe6Sg9BA",  # 11s
-    "BAACAgEAAxkBAAMJanvd6TMFHbXOJhMDQKA7nmbqu9EAAjsIAALXHuFHYw1Bd358q9Y9BA",  # 12s
-    "BAACAgEAAxkBAAMIanvd6EgEPC10v73Qllv3LkpF3kAAAjoIAALXHuFHrLFcoPgzJqs9BA",  # 5s
-    "BAACAgEAAxkBAAMHanvd57NHGzfWMAABD6oVHA1uAAGumQACOQgAAtce4UcPaNBTIBJ3vD0E", # 18s
-    "BAACAgEAAxkBAAMGanvd59XTyesvUYRMqV59VF9YuXoAAjgIAALXHuFH9gutMcKA3JI9BA",  # 7s
-    "BAACAgEAAxkBAAMFanvd3OOwk5fjRbquOF46iNkqNtkAAjcIAALXHuFHzx8KK4f6mfA9BA"   # 15s
-]
+# --- CONFIGURAÇÃO DE DNS PARA O MONGODB ---
+RESOLV_CONF = "/etc/resolv.conf"
+if not os.path.exists(RESOLV_CONF):
+    os.makedirs("/data/data/com.termux/files/usr/etc", exist_ok=True)
 
 try:
-    mongo_client = MongoClient(
-        MONGO_URI,
-        serverSelectionTimeoutMS=5000,
-        connectTimeoutMS=5000,
-        tlsAllowInvalidCertificates=True
-    )
-    db = mongo_client["sanizinhabot_db"]
-    collection_clientes = db["clientes"]
-    collection_chats = db["chats_autorizados"]
+    import dns.resolver
+    dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+    dns.resolver.default_resolver.nameservers = ['8.8.8.8', '1.1.1.1']
+except ImportError:
+    pass
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    TypeHandler, ContextTypes, ApplicationHandlerStop, ChatMemberHandler,
+    ChatJoinRequestHandler, MessageHandler, filters
+)
+from pymongo import MongoClient
+from config import (
+    BOTS_CONFIG, GRUPO_VIP, GRUPO_VIP_LINK,
+    FUSO_RJ, PLANOS_VIP_APENAS, MENSAGEM_VIP
+)
+
+# ==============================================
+# 🔗 CONEXÃO COM O MONGODB (VIA VARIÁVEL DE AMBIENTE)
+# ==============================================
+MONGO_URI = os.getenv("MONGO_URI", "")
+
+if not MONGO_URI:
+    print("❌ ERRO: A variável de ambiente MONGO_URI não foi configurada!")
+    sys.exit(1)
+
+try:
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    mongo_client.admin.command('ping')
+    db = mongo_client.get_database("bot_database")
+    colecao_clientes = db["clientes"]
+    colecao_bloqueados = db["bloqueados"]
+    print("✅ Conectado ao MongoDB com sucesso!")
 except Exception as e:
-    print(f"Erro crítico ao conectar no MongoDB: {e}")
+    print(f"❌ ERRO ao conectar no MongoDB: {e}")
+    sys.exit(1)
 
-TEMPO_INICIAL = time.time()
-FUSO_RJ = timezone(timedelta(hours=-3))
+gc.enable()
 
-ULTIMO_COMANDO = {}
-CONTADOR_AVISOS_FLOD = {}
-BLOQUEIO_FLOD = {}
-TEMPO_LIMITE_COMANDO = 2
-MAX_AVISOS_FLOD = 5
-TEMPO_BLOQUEIO_FLOD = 600
+def verificar_wifi():
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            s.close()
+            return True
+        except Exception:
+            time.sleep(10)
 
-pagamentos_notificados = set()
+CANAL_DIVULGACAO_ID = -1004356555284
+GRUPO_ORIGEM_VIP_ID = None
 
-# Função nova: verifica se é cliente ativo
-def eh_cliente_ativo(user_id: int) -> bool:
-    if user_id == DONO_ID:
+LEGENDA_DIVULGACAO = """⚠️😶‍🌫️ VIDEO COMPLETO NO GRUPO VIP🔥⚠️
+
+BÔNUS ⤵️ 
++20 𝗠𝗜𝗟 𝗠𝗜𝗗𝗜𝗔𝗦 𝗟𝗜𝗕𝗘𝗥𝗔𝗗𝗔𝗦✅
+𝗠𝗶𝗱𝗶𝗮𝘀 𝗿𝗮𝗿𝗮𝘀 𝗲 𝗱𝗶𝗳𝗶𝗰𝗲𝗶𝘀 𝗱𝗲 𝗲𝗻𝗰𝗼𝗻𝘁𝗿𝗮𝗿💎
+𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱𝘀 liberados☑️"""
+
+def carregar_bloqueados():
+    try:
+        docs = colecao_bloqueados.find({})
+        return {doc["_id"]: doc for doc in docs}
+    except Exception as e:
+        print(f"ERRO LER BLOQUEADOS: {e}")
+        return {}
+
+def salvar_bloqueados(bloqueados):
+    try:
+        for uid, dados in bloqueados.items():
+            colecao_bloqueados.update_one(
+                {"_id": uid},
+                {"$set": dados},
+                upsert=True
+            )
+    except Exception as e:
+        print(f"ERRO SALVAR BLOQUEADOS: {e}")
+
+def carregar_clientes():
+    try:
+        docs = colecao_clientes.find({})
+        return {doc["_id"]: doc for doc in docs}
+    except Exception as e:
+        print(f"ERRO LER CLIENTES: {e}")
+        return {}
+
+def salvar_clientes(clientes):
+    try:
+        for uid, dados in clientes.items():
+            dados["_id"] = uid
+            colecao_clientes.replace_one({"_id": uid}, dados, upsert=True)
+    except Exception as e:
+        print(f"ERRO SALVAR CLIENTES: {e}")
+
+def remover_cliente(uid):
+    try:
+        colecao_clientes.delete_one({"_id": str(uid)})
+    except Exception as e:
+        print(f"ERRO REMOVER CLIENTE: {e}")
+
+BLOQUEADOS = carregar_bloqueados()
+AVISADO_HOJE = {}
+
+def esta_bloqueado(uid):
+    return str(uid) in BLOQUEADOS
+
+def aviso_ja_enviado(uid):
+    uid = str(uid)
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    if AVISADO_HOJE.get(uid) == hoje:
         return True
-    cli = collection_clientes.find_one({"user_id": user_id})
-    return bool(cli and cli.get("expira_em", 0) > time.time())
+    AVISADO_HOJE[uid] = hoje
+    return False
+
+MENSAGEM_BLOQUEADO = """🚫 VOCÊ FOI BLOQUEADO!
+Motivo: Floodar / sobrecarregar o sistema.
+
+Se acha que foi engano, fale com o suporte:
+📞 @Lyhhxv
+
+Não crie novas contas — serão bloqueadas também.
+"""
+
+def log(bot_nome, tipo, mensagem):
+    hora = datetime.now().strftime("%H:%M:%S")
+    cor = {
+        "USUARIO": "\033[94m", "VENDA": "\033[92m", "ERRO": "\033[91m",
+        "SISTEMA": "\033[93m", "AVISO": "\033[95m", "BLOQUEIO": "\033[90m",
+        "CHAT": "\033[96m"
+    }.get(tipo, "\033[97m")
+    reset = "\033[0m"
+    print(f"[{hora}] {cor}[{bot_nome}] [{tipo}] {mensagem}{reset}")
 
 def formatar_tempo_restante(segundos):
-    if segundos <= 0:
-        return "Expirado"
-    if segundos >= 315360000:
-        return "Permanente"
+    if segundos <= 0: return "Expirado"
+    if segundos >= 3153600000: return "♾️ VITALÍCIO"
+    if segundos >= 31536000: return "1 Ano"
     dias = int(segundos // 86400)
     horas = int((segundos % 86400) // 3600)
     minutos = int((segundos % 3600) // 60)
     partes = []
-    if dias > 0:
-        partes.append(f"{dias}d")
-    if horas > 0:
-        partes.append(f"{horas}h")
-    if minutos > 0:
-        partes.append(f"{minutos}m")
+    if dias > 0: partes.append(f"{dias}d")
+    if horas > 0: partes.append(f"{horas}h")
+    if minutos > 0: partes.append(f"{minutos}m")
     return " ".join(partes) if partes else "Menos de 1m"
 
-def formatar_data_rj(timestamp):
-    return datetime.fromtimestamp(timestamp, tz=FUSO_RJ).strftime("%d/%m/%Y as %H:%M")
+def formatar_data_rj(ts):
+    if ts >= 3153600000: return "♾️ VITALÍCIO"
+    return datetime.fromtimestamp(ts, tz=FUSO_RJ).strftime("%d/%m/%Y as %H:%M")
 
-async def pegarid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != DONO_ID:
-        return
-    mensagem = update.message
-    if mensagem.reply_to_message and mensagem.reply_to_message.video:
-        video = mensagem.reply_to_message.video
-        file_id = video.file_id
-        duracao = video.duration
-        texto = (
-            "✅ FILE_ID DO VIDEO:\n\n"
-            f"{file_id}\n\n"
-            f"Duração: {duracao}s\n\n"
-            "Coloque esse codigo na lista LISTA_VIDEOS_START!"
-        )
-        await mensagem.reply_text(texto)
-        return
-    if mensagem.video:
-        file_id = mensagem.video.file_id
-        duracao = mensagem.video.duration
-        texto = (
-            "✅ FILE_ID DO VIDEO:\n\n"
-            f"{file_id}\n\n"
-            f"Duração: {duracao}s\n\n"
-            "Coloque esse codigo na lista LISTA_VIDEOS_START!"
-        )
-        await mensagem.reply_text(texto)
-        return
-    await mensagem.reply_text(
-        "⚠️ RESPONDA um vídeo com /pegarid ou mande o vídeo junto com o comando!"
-    )
-
-async def clientes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != DONO_ID:
-        return
+async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
+    token = bot_cfg["token"]
+    mp_token = bot_cfg["mp_token"]
+    dono_id = bot_cfg["dono_id"]
+    lista_midias = bot_cfg["midias"]
+    nome_bot = bot_cfg["nome"]    
+    planos_usar = PLANOS_VIP_APENAS
+    mensagem_inicial = MENSAGEM_VIP
+    ULTIMO_COMANDO = {}
+    CONTADOR_AVISOS_FLOD = {}
+    BLOQUEIO_FLOD = {}
+    TEMPO_LIMITE_COMANDO = 2
+    MAX_AVISOS_FLOD = 5
+    TEMPO_BLOQUEIO_FLOD = 600
+    msgs_para_apagar = {}
+    
     try:
-        agora = time.time()
-        clientes = list(collection_clientes.find({}))
-        if not clientes:
-            await update.message.reply_text("📭 Nenhum cliente cadastrado no momento.")
-            return
-        texto = f"📋 LISTA DE CLIENTES ATIVOS ({len(clientes)}):\n⏰ Dados atualizados em tempo real!\n\n"
-        for idx, cli in enumerate(clientes, 1):
-            user_id = cli.get("user_id")
-            expira_em = cli.get("expira_em", 0)
-            tempo_restante = expira_em - agora
-            tempo_str = formatar_tempo_restante(tempo_restante)
-            nome_atual = "❌ Não consegue carregar"
-            username_atual = "Sem @"
-            try:
-                usuario = await context.bot.get_chat(user_id)
-                nome_completo = f"{usuario.first_name or ''} {usuario.last_name or ''}".strip()
-                nome_atual = nome_completo if nome_completo else "Sem nome"
-                username_atual = f"@{usuario.username}" if usuario.username else "Sem @"
-            except Exception as e:
-                nome_atual = cli.get("nome", "Não foi possível carregar")
-                username_atual = cli.get("username", "Sem @")
-            collection_clientes.update_one(
-                {"user_id": user_id},
-                {"$set": {"nome": nome_atual, "username": username_atual}}
-            )
-            valor_pago = cli.get("valor_pago", "Sem registro")
-            data_compra_ts = cli.get("data_compra")
-            data_compra = formatar_data_rj(data_compra_ts) if data_compra_ts else "Sem registro"
-            data_limite = "♾️ PERMANENTE" if tempo_str == "Permanente" else formatar_data_rj(expira_em)
+        tmp_app = ApplicationBuilder().token(token).build()
+        await tmp_app.initialize()
+        bot_info = await tmp_app.bot.get_me()
+        bot_username = bot_info.username
+        await tmp_app.shutdown()
+    except:
+        bot_username = None
 
-            texto += (
-                f"🔹 {idx}. {nome_atual}\n"
-                f"🆔 ID: {user_id}\n"
-                f"👤 Usuário: {username_atual}\n"
-                f"💰 Valor Pago: R$ {valor_pago}\n"
-                f"📅 Compra: {data_compra}\n"
-                f"⏳ Restante: {tempo_str}\n"
-                f"📆 Expira: {data_limite}\n\n"
-            )
-
-        await update.message.reply_text(texto)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erro ao listar clientes: {str(e)}")
-
-
-async def interceptador_universal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
+    if not token or ":" not in token or len(token) < 30:
+        log(nome_bot, "ERRO", f"TOKEN INVÁLIDO OU NÃO DEFINIDO NAS VARIÁVEIS DE AMBIENTE.")
         return
-    user_id = user.id
-    agora = time.time()
-    if user_id == DONO_ID:
-        return
-    if user_id in BLOQUEIO_FLOD:
-        if BLOQUEIO_FLOD[user_id] > agora:
-            raise ApplicationHandlerStop
-        else:
-            del BLOQUEIO_FLOD[user_id]
-            CONTADOR_AVISOS_FLOD.pop(user_id, None)
-    COMANDOS_LIBERADOS = ['/start', '/suporte', '/suport']
-    if update.message and update.message.text and update.message.text.startswith('/'):
-        cmd = update.message.text.split()[0].split('@')[0].lower()
-        if cmd in COMANDOS_LIBERADOS:
-            if user_id not in ULTIMO_COMANDO:
-                ULTIMO_COMANDO[user_id] = {}
-            ultimo = ULTIMO_COMANDO[user_id].get(cmd, 0)
-            if agora - ultimo < TEMPO_LIMITE_COMANDO:
-                CONTADOR_AVISOS_FLOD[user_id] = CONTADOR_AVISOS_FLOD.get(user_id, 0) + 1
-                avisos = CONTADOR_AVISOS_FLOD[user_id]
-                if avisos >= MAX_AVISOS_FLOD:
-                    BLOQUEIO_FLOD[user_id] = agora + TEMPO_BLOQUEIO_FLOD
-                    CONTADOR_AVISOS_FLOD[user_id] = 0
-                    if update.effective_chat.type == "private":
-                        try:
-                            await context.bot.send_message(
-                                chat_id=update.effective_chat.id,
-                                text="Bloqueado por floodar! Tente novamente em 10 minutos."
-                            )
-                        except:
-                            pass
+    log(nome_bot, "SISTEMA", f"✅ INICIANDO — {'[PRINCIPAL]' if is_principal else '[VENDEDOR]'}")
+    clientes = carregar_clientes()
+
+    LINK_BOTAO_START = f"https://t.me/{bot_username}?start=vip" if bot_username else GRUPO_VIP_LINK
+
+    def eh_ativo(uid, clientes_atual=None):
+        uid = str(uid)
+        if uid == str(dono_id): return True
+        c = (clientes_atual or clientes).get(uid, {})
+        if not c: return False
+        exp = c.get("expira_em", 0)
+        if exp >= 3153600000: return True
+        return exp > time.time()
+
+    async def enviar_midia(bot_or_message, chat_id, midia_id, caption, reply_markup):
+        is_photo = midia_id.startswith("AgAC") if midia_id else False
+        try:
+            if not midia_id:
+                raise ValueError("ID de mídia vazio/inválido")
+            if hasattr(bot_or_message, 'reply_video') or hasattr(bot_or_message, 'reply_photo'):
+                if is_photo:
+                    await bot_or_message.reply_photo(midia_id, caption=caption, reply_markup=reply_markup, protect_content=True, parse_mode="Markdown")
                 else:
-                    if update.effective_chat.type == "private":
-                        try:
-                            await context.bot.send_message(
-                                chat_id=update.effective_chat.id,
-                                text="Cuidado! Nao envie muitos comandos seguidos."
-                            )
-                        except:
-                            pass
-                raise ApplicationHandlerStop
-            ULTIMO_COMANDO[user_id][cmd] = agora
+                    await bot_or_message.reply_video(midia_id, caption=caption, reply_markup=reply_markup, protect_content=True, parse_mode="Markdown")
+            else:
+                if is_photo:
+                    await bot_or_message.send_photo(chat_id, midia_id, caption=caption, reply_markup=reply_markup, protect_content=True, parse_mode="Markdown")
+                else:
+                    await bot_or_message.send_video(chat_id, midia_id, caption=caption, reply_markup=reply_markup, protect_content=True, parse_mode="Markdown")
+        except Exception as e:
+            log(nome_bot, "ERRO", f"Falha ao enviar mídia ({e}). Enviando texto...")
+            try:
+                if hasattr(bot_or_message, 'reply_text'):
+                    await bot_or_message.reply_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
+                else:
+                    await bot_or_message.send_message(chat_id, caption, reply_markup=reply_markup, parse_mode="Markdown")
+            except Exception as e2:
+                log(nome_bot, "ERRO", f"Falha final ao responder {chat_id}: {e2}")
+
+    async def monitorar_entradas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not is_principal or GRUPO_VIP is None: return
+        result = update.chat_member
+        if not result: return
+        chat_id = update.effective_chat.id
+        if chat_id != GRUPO_VIP:
             return
-        else:
+        status_novo = result.new_chat_member.status
+        if status_novo in ["member"]:
+            uid = str(result.new_chat_member.user.id)
+            nome_usuario = result.new_chat_member.user.first_name or "Sem nome"          
+            if uid == str(dono_id) or result.new_chat_member.user.is_bot:
+                return
+            clientes_atual = carregar_clientes()
+            if not eh_ativo(uid, clientes_atual):
+                log(nome_bot, "SISTEMA", f"🚫 REMOVENDO INVASOR — {nome_usuario} | ID:{uid}")
+                try:
+                    await ctx.bot.ban_chat_member(chat_id=chat_id, user_id=int(uid))
+                    await ctx.bot.unban_chat_member(chat_id=chat_id, user_id=int(uid))
+                    log(nome_bot, "SISTEMA", f"✅ INVASOR REMOVIDO — ID:{uid}")
+                except Exception as e:
+                    log(nome_bot, "ERRO", f"❌ ERRO AO KICKAR: {e}")
+        
+    async def aprovar_solicitacao(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not is_principal or GRUPO_VIP is None: return
+        req = update.chat_join_request
+        if not req: return
+        chat_id = update.effective_chat.id
+        if chat_id != GRUPO_VIP:
+            return
+        uid = str(req.from_user.id)
+        clientes_atual = carregar_clientes()        
+        try:
+            if eh_ativo(uid, clientes_atual):
+                log(nome_bot, "SISTEMA", f"✅ APROVANDO ENTRADA — {req.from_user.first_name} | ID:{uid}")
+                
+                cli = clientes_atual.get(uid, {})
+                duracao_original = cli.get("duracao_segundos", 0)
+                if duracao_original > 0 and duracao_original < 3153600000:
+                    novo_tempo_expira = time.time() + duracao_original
+                    cli["expira_em"] = novo_tempo_expira
+                    cli["data_entrada_grupo"] = time.time()
+                    salvar_clientes(clientes_atual)
+                    log(nome_bot, "SISTEMA", f"⏳ Contagem iniciada para {req.from_user.first_name} a partir da entrada!")
+
+                await req.approve()
+            else:
+                log(nome_bot, "BLOQUEIO", f"🚫 RECUSANDO ENTRADA — {req.from_user.first_name} | ID:{uid}")
+                await req.decline()
+        except Exception as e:
+            if "Hide_requester_missing" in str(e) or "USER_ALREADY_PART" in str(e):
+                pass
+            else:
+                log(nome_bot, "ERRO", f"Erro no join request: {e}")
+
+    async def log_mensagens(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.message and update.message.text:
+            u = update.effective_user
+            nome = u.first_name if u else "Desconhecido"
+            uid = u.id if u else "0"
+            texto = update.message.text
+            log(nome_bot, "CHAT", f"MSG de {nome} (ID: {uid}): {texto}")
+
+    async def interceptar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        u = update.effective_user
+        if not u: return
+        uid = u.id
+        agora = time.time()
+        if esta_bloqueado(uid):
+            if not aviso_ja_enviado(uid):
+                try: await ctx.bot.send_message(update.effective_chat.id, MENSAGEM_BLOQUEADO)
+                except: pass
+            log(nome_bot, "BLOQUEIO", f"🚫 BLOQUEADO TENTOU INTERAGIR — ID:{uid}")
             raise ApplicationHandlerStop
 
-# Handler de bloqueio de entrada adicionado
-async def bloquear_nao_pagantes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    membro = update.chat_member
-    if not membro or membro.chat.id != CANAL_ALVO_ID:
-        return
-    usuario = membro.new_chat_member.user
-    if membro.new_chat_member.status == "member":
-        if not eh_cliente_ativo(usuario.id):
-            try:
-                await context.bot.send_message(
-                    usuario.id,
-                    "❌ Acesso negado! Compre um plano pelo /start para entrar no grupo."
-                )
-                await context.bot.ban_chat_member(CANAL_ALVO_ID, usuario.id)
-                await context.bot.unban_chat_member(CANAL_ALVO_ID, usuario.id)
-            except Exception as e:
-                print(f"Erro ao remover usuário não autorizado: {e}")
+        if uid == dono_id: return
+        COMANDOS_LIBERADOS = ['/start', '/suporte', '/suport', '/meu_id', '/block', '/desbloquear', '/div', '/div2', '/menu']
+        if update.message and update.message.text and update.message.text.startswith('/'):
+            cmd = update.message.text.split()[0].split('@')[0].lower()
+            if cmd in COMANDOS_LIBERADOS:
+                if cmd in ['/div', '/div2', '/menu']:
+                    raise ApplicationHandlerStop
+                
+                if uid not in ULTIMO_COMANDO: ULTIMO_COMANDO[uid] = {}
+                ultimo = ULTIMO_COMANDO[uid].get(cmd, 0)
+                if agora - ultimo < TEMPO_LIMITE_COMANDO:
+                    CONTADOR_AVISOS_FLOD[uid] = CONTADOR_AVISOS_FLOD.get(uid, 0) + 1
+                    if CONTADOR_AVISOS_FLOD[uid] >= MAX_AVISOS_FLOD:
+                        BLOQUEIO_FLOD[uid] = agora + TEMPO_BLOQUEIO_FLOD
+                        CONTADOR_AVISOS_FLOD[uid] = 0
+                        await ctx.bot.send_message(update.effective_chat.id, "🚫 Bloqueado por floodar! Tente em 10 min.")
+                        raise ApplicationHandlerStop
+                    await ctx.bot.send_message(update.effective_chat.id, "⚠️ Não envie muitos comandos seguidos.")
+                    raise ApplicationHandlerStop
+                ULTIMO_COMANDO[uid][cmd] = agora
+                return
+            raise ApplicationHandlerStop
 
-async def verificar_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result = update.my_chat_member
-    if not result:
-        return
-    chat = result.chat
-    new_status = result.new_chat_member.status
-    if chat.type in ["group", "supergroup", "channel"]:
+    async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_chat.type != "private": return
+        u = update.effective_user
+
+        kb = []
+        for valor, (seg, nome_plano, grupo_id, grupo_link) in planos_usar.items():
+            kb.append([InlineKeyboardButton(f"{nome_plano} -> R$ {valor:.2f}", callback_data=f"comprar_{valor}")])
+        kb.append([InlineKeyboardButton("𝑷𝑹𝑬𝑽𝑰𝑨𝑺 𝑮𝑹𝑨𝑻𝑰𝑺🔥", url="https://t.me/+zL_k2splzuZiYTUx")])
+
+        mid = random.choice(lista_midias) if lista_midias else None
+        await enviar_midia(update.message, update.effective_chat.id, mid, mensagem_inicial, InlineKeyboardMarkup(kb))
+
+    async def div_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        msg = update.message
+        reply = msg.reply_to_message
+        
+        if not reply or not (reply.video or reply.photo):
+            await msg.reply_text("⚠️ Responda a uma foto ou a um vídeo com o comando /div")
+            return
+
+        botao = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 ENTRAR AGORA 🔥", url=LINK_BOTAO_START)]])
+        
         try:
-            if new_status in ["member", "administrator"]:
-                collection_chats.update_one(
-                    {"chat_id": chat.id},
-                    {"$set": {"chat_id": chat.id, "title": chat.title, "type": chat.type}},
-                    upsert=True
+            if reply.video:
+                await ctx.bot.send_video(
+                    chat_id=CANAL_DIVULGACAO_ID,
+                    video=reply.video.file_id,
+                    caption=LEGENDA_DIVULGACAO,
+                    reply_markup=botao,
+                    protect_content=True,
+                    parse_mode="Markdown"
                 )
-            elif new_status in ["left", "kicked"]:
-                collection_chats.delete_one({"chat_id": chat.id})
+            elif reply.photo:
+                await ctx.bot.send_photo(
+                    chat_id=CANAL_DIVULGACAO_ID,
+                    photo=reply.photo[-1].file_id,
+                    caption=LEGENDA_DIVULGACAO,
+                    reply_markup=botao,
+                    protect_content=True,
+                    parse_mode="Markdown"
+                )
+            await msg.reply_text("✅ Divulgação enviada com sucesso!")
         except Exception as e:
-            print(f"Erro ao atualizar chat no DB: {e}")
+            await msg.reply_text(f"❌ Erro ao enviar divulgação: {e}")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    texto_boas_vindas = (
-        "𝗧𝗢𝗗𝗢𝗦 𝗢𝗦 𝗖𝗢𝗡𝗧𝗘𝗨𝗗𝗢𝗦 𝗩𝗔𝗭𝗔𝗗0𝗦🤫 𝗗𝗢 𝗠𝗢𝗠𝗘𝗡𝗧𝗢🥵\n\n"
-        "Tenha acesso completo a todo o nosso conteudo atualizado em um so lugar:\n\n"
-        "Mais de 20mil midias disponiveis (videos e fotos)\n"
-        "𝗘𝘀𝗰𝗼𝗹𝗵𝗮 𝘀𝗲𝘂 𝗽𝗹𝗮𝗻𝗼 𝗲 𝗲𝗻𝘁𝗿𝗲 𝗻𝗼 𝘃𝗶𝗽:\n\n"
-        "suporte: @Lyhhxv"
-    )
-    keyboard = [
-        [InlineKeyboardButton("1 𝗛𝗢𝗥𝗔 -> R$ 1,00🔥", callback_data="comprar_1.00")],
-        [InlineKeyboardButton("ACESSO POR 1 DIA -> R$ 5,00", callback_data="comprar_5.00")],
-        [InlineKeyboardButton("ACESSO POR 1 SEMANA -> R$ 10,00", callback_data="comprar_10.00")],
-        [InlineKeyboardButton("ACESSO POR 1 MES -> R$ 30,00", callback_data="comprar_30.00")],
-        [InlineKeyboardButton("💎ACESSO PERMANENTE -> R$ 55,00", callback_data="comprar_55.00")],
-        [InlineKeyboardButton("𝑷𝑹𝑬𝑽𝑰𝑨𝑺 𝑮𝑹𝑨𝑻𝑰𝑺🔥", url="https://t.me/+Qmozi6YQ5dE1MDYx")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    video_escolhido = random.choice(LISTA_VIDEOS_START)
-    try:
-        await update.message.reply_video(
-            video=video_escolhido,
-            caption=texto_boas_vindas,
-            reply_markup=reply_markup,
-            protect_content=True
-        )
-    except Exception as e:
-        print(f"Video nao enviado: {e}")
-        await update.message.reply_text(texto_boas_vindas, reply_markup=reply_markup)
+    async def div2_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        msg = update.message
+        reply = msg.reply_to_message
+        
+        texto_custom = " ".join(ctx.args)
+        if not texto_custom:
+            await msg.reply_text("⚠️ Uso correto: /div2 [Sua mensagem aqui] (respondendo a uma foto ou vídeo)")
+            return
 
+        if not reply or not (reply.video or reply.photo):
+            await msg.reply_text("⚠️ Responda a uma foto ou a um vídeo junto com o comando /div2")
+            return
 
-async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != DONO_ID:
-        return
-    chat = update.effective_chat
-    user = update.effective_user
-    resposta = (
-        "INFORMACOES DE ID:\n\n"
-        f"Nome do Chat: {chat.title if chat.title else 'Privado'}\n"
-        f"ID deste Chat/Grupo: {chat.id}\n"
-        f"Seu ID de Usuario: {user.id}"
-    )
-    await update.message.reply_text(resposta)
-
-async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != DONO_ID:
-        return
-    inicio = time.time()
-    msg = await update.message.reply_text("pong...")
-    latencia = int((time.time() - inicio) * 1000)
-    uptime = int(time.time() - TEMPO_INICIAL)
-    resposta = (
-        "PONG! Informacoes do Sistema:\n\n"
-        f"Latencia: {latencia}ms\n"
-        f"Tempo online: {uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s\n"
-        "RAM: 512 MB"
-    )
-    await msg.edit_text(resposta)
-
-async def suporte_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Central de Suporte\n\n"
-        "Contate: @Lyhhxv"
-    )
-
-async def gerar_pagamento(valor, user, bot):
-    url = "https://api.mercadopago.com/v1/payments"
-    headers = {
-        "Authorization": f"Bearer {MP_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-        "X-Idempotency-Key": str(uuid.uuid4())
-    }
-    payload = {
-        "transaction_amount": valor,
-        "description": f"Acesso VIP - R$ {valor:.2f}",
-        "payment_method_id": "pix",
-        "payer": {
-            "email": f"user_{user.id}@telegrambot.com",
-            "first_name": user.first_name or "Cliente",
-            "last_name": user.last_name or "Telegram"
-        }
-    }
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
-        if resp.status_code == 201:
-            dados = resp.json()
-            qr = dados.get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code", "")
-            return True, dados["id"], qr
-        else:
-            print(f"ERRO MP: {resp.status_code} | {resp.text[:300]}")
-            return False, None, f"Erro API: {resp.status_code}"
-    except Exception as e:
-        print(f"ERRO CONEXAO MP: {e}")
-        return False, None, f"Erro de conexao: {str(e)}"
-
-async def verificar_pagamento(pag_id):
-    url = f"https://api.mercadopago.com/v1/payments/{pag_id}"
-    headers = {"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            dados = resp.json()
-            return dados.get("status") == "approved", dados.get("transaction_amount", 0)
-        return False, 0
-    except Exception as e:
-        print(f"Erro verificar pagamento: {e}")
-        return False, 0
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    dados = query.data
-
-    if dados.startswith("comprar_"):
-        valor = float(dados.split("_")[1])
+        botao = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 ENTRAR AGORA 🔥", url=LINK_BOTAO_START)]])
+        
         try:
-            await query.edit_message_caption(caption="Gerando seu PIX, aguarde...", reply_markup=None)
+            if reply.video:
+                await ctx.bot.send_video(
+                    chat_id=CANAL_DIVULGACAO_ID,
+                    video=reply.video.file_id,
+                    caption=texto_custom,
+                    reply_markup=botao,
+                    protect_content=True,
+                    parse_mode="Markdown"
+                )
+            elif reply.photo:
+                await ctx.bot.send_photo(
+                    chat_id=CANAL_DIVULGACAO_ID,
+                    photo=reply.photo[-1].file_id,
+                    caption=texto_custom,
+                    reply_markup=botao,
+                    protect_content=True,
+                    parse_mode="Markdown"
+                )
+            await msg.reply_text("✅ Divulgação personalizada enviada com sucesso!")
+        except Exception as e:
+            await msg.reply_text(f"❌ Erro ao enviar divulgação: {e}")
+
+    async def menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        
+        texto_menu = (
+            "🤖 PAINEL DE COMANDOS DO DONO\n\n"
+            "📢 Divulgação:\n"
+            "• /div — Envia mídia com legenda padrão.\n"
+            "• /div2 [texto] — Envia mídia com texto personalizado.\n\n"
+            "👥 Gerenciamento:\n"
+            "• /clientes ou /clt — Lista todos os clientes ativos.\n\n"
+            "🔒 Moderação:\n"
+            "• /block [ID] — Bloqueia usuário.\n"
+            "• /desbloquear [ID] — Desbloqueia usuário.\n\n"
+            "🛠️ Utilitários:\n"
+            "• /pegarid — Copia o file_id de uma mídia.\n"
+            "• /meu_id — Mostra seu ID.\n"
+            "• /suporte — Contato de suporte.\n"
+            "• /menu — Exibe este painel."
+        )
+        await update.message.reply_text(texto_menu)
+
+    async def block_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        args = ctx.args
+        if not args:
+            await update.message.reply_text("⚠️ Uso: /block {id}")
+            return
+        try: uid_alvo = str(int(args[0]))
         except:
+            await update.message.reply_text("⚠️ ID inválido!")
+            return
+        if uid_alvo == str(dono_id):
+            await update.message.reply_text("⚠️ Não pode bloquear o dono!")
+            return
+        global BLOQUEADOS
+        BLOQUEADOS[uid_alvo] = {"motivo": "Bloqueado pelo dono", "bloqueado_em": time.time()}
+        salvar_bloqueados(BLOQUEADOS)
+        log(nome_bot, "BLOQUEIO", f"🚫 USUÁRIO {uid_alvo} BLOQUEADO!")
+        await update.message.reply_text(f"✅ USUÁRIO {uid_alvo} BLOQUEADO!")
+
+    async def desbloquear_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        args = ctx.args
+        if not args:
+            await update.message.reply_text("⚠️ Uso: /desbloquear {id}")
+            return
+        try: uid_alvo = str(int(args[0]))
+        except:
+            await update.message.reply_text("⚠️ ID inválido!")
+            return
+        global BLOQUEADOS
+        if uid_alvo in BLOQUEADOS:
+            del BLOQUEADOS[uid_alvo]
+            salvar_bloqueados(BLOQUEADOS)
+            log(nome_bot, "BLOQUEIO", f"🔓 USUÁRIO {uid_alvo} DESBLOQUEADO!")
+            await update.message.reply_text(f"✅ USUÁRIO {uid_alvo} DESBLOQUEADO!")
+        else:
+            await update.message.reply_text(f"⚠️ Não está bloqueado.")
+
+    async def meu_id_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        uid = str(update.effective_user.id)
+        texto = f"🆔 SEU ID:\n\n<code>{uid}</code>"
+        kb = [[InlineKeyboardButton("📋 COPIAR", copy_text=CopyTextButton(uid))]]
+        await update.message.reply_text(texto, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+    async def suporte_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("📞 SUPORTE:\n\nContate: @Lyhhxv")
+
+    async def pegarid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        mensagem = update.message
+        file_id = None
+        if mensagem.reply_to_message:
+            if mensagem.reply_to_message.video: file_id = mensagem.reply_to_message.video.file_id
+            elif mensagem.reply_to_message.document: file_id = mensagem.reply_to_message.document.file_id
+            elif mensagem.reply_to_message.photo: file_id = mensagem.reply_to_message.photo[-1].file_id
+        elif mensagem.video: file_id = mensagem.video.file_id
+        elif mensagem.document: file_id = mensagem.document.file_id
+        elif mensagem.photo: file_id = mensagem.photo[-1].file_id
+        if not file_id:
+            await mensagem.reply_text("⚠️ Responda um vídeo ou foto com /pegarid")
+            return
+        texto = f"✅ FILE_ID:\n\n<code>{file_id}</code>"
+        kb = [[InlineKeyboardButton("📋 COPIAR", copy_text=CopyTextButton(file_id))]]
+        await mensagem.reply_text(texto, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+    async def expurgar_expirados(bot_instancia):
+        if not is_principal: return 0
+        agora = time.time()
+        removidos_count = 0
+
+        log(nome_bot, "AVISO", f"🔍 CHECAGEM DE EXPIRADOS — Verificando...")
+        
+        clientes_atual = carregar_clientes()
+        
+        for uid_str in list(clientes_atual.keys()):
+            cli = clientes_atual[uid_str]
+            exp = cli.get("expira_em", 0)
+            
+            if exp >= 3153600000:
+                continue
+            if exp > agora:
+                continue
+
+            grupo_id = cli.get("grupo") or GRUPO_VIP
+            if not grupo_id:
+                log(nome_bot, "ERRO", f"❌ ID do grupo vazio para o cliente {uid_str}")
+                continue
+
+            log(nome_bot, "AVISO", f"🚨 ID:{uid_str} EXPIRADO! Removendo do grupo...")
+            
             try:
-                await query.edit_message_text("Gerando seu PIX, aguarde...")
+                chat_id_num = int(grupo_id)
+                user_id_num = int(uid_str)
+                
+                await bot_instancia.ban_chat_member(chat_id=chat_id_num, user_id=user_id_num)
+                await bot_instancia.unban_chat_member(chat_id=chat_id_num, user_id=user_id_num, only_if_banned=True)
+                
+                remover_cliente(uid_str)
+                removidos_count += 1
+                log(nome_bot, "SISTEMA", f"✅ REMOVIDO — ID:{uid_str}")
+                    
+            except Exception as e:
+                log(nome_bot, "ERRO", f"❌ Erro ao banir {uid_str}: {e}")
+        
+        del clientes_atual
+        gc.collect()
+        return removidos_count
+
+    async def clientes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        if is_principal:
+            await expurgar_expirados(ctx.bot)
+            
+        clientes_atual = carregar_clientes()
+        agora = time.time()
+        if not clientes_atual:
+            await update.message.reply_text("📭 Nenhum cliente ativo.")
+            return
+        texto = f"📋 CLIENTES ATIVOS ({len(clientes_atual)}):\n\n"
+        for idx, (uid, cli) in enumerate(clientes_atual.items(), 1):
+            expira_em = cli.get("expira_em", 0)
+            if expira_em >= 3153600000:
+                tempo_str = "♾️ VITALÍCIO"
+                data_limite = "♾️ VITALÍCIO"
+            else:
+                tempo_restante = expira_em - agora
+                tempo_str = formatar_tempo_restante(tempo_restante)
+                data_limite = formatar_data_rj(expira_em)
+            nome = cli.get("nome", "Sem nome")
+            username = cli.get("username", "Sem @")
+            grupo_link = cli.get("grupo_link", GRUPO_VIP_LINK)
+            valor = cli.get("valor_pago", "Sem registro")
+            data_compra = formatar_data_rj(cli.get("data_compra")) if cli.get("data_compra") else "Sem registro"
+            texto += f"🔹 {idx}. {nome}\n🆔 ID: {uid}\n👤 Usuário: {username}\n💰 Valor: R$ {valor}\n📅 Compra: {data_compra}\n⏳ Restante: {tempo_str}\n📆 Expira: {data_limite}\n👥 Grupo: {grupo_link}\n\n"
+        await update.message.reply_text(texto)
+
+    async def gerar_pag(valor, user):
+        log(nome_bot, "USUARIO", f"Gerando PIX — User:{user.id} Valor:R${valor}")
+        url = "https://api.mercadopago.com/v1/payments"
+        headers = {"Authorization": f"Bearer {mp_token}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4())}
+        payload = {
+            "transaction_amount": valor,
+            "description": f"Acesso VIP R${valor:.2f}",
+            "payment_method_id": "pix",
+            "payer": {"email": f"u_{user.id}@bot.com", "first_name": user.first_name or "Cliente", "last_name": user.last_name or "Telegram"}
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code == 201:
+                d = r.json()
+                qr = d.get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code", "")
+                return True, d["id"], qr
+            return False, None, f"Erro {r.status_code}: {r.text[:80]}"
+        except Exception as e:
+            log(nome_bot, "ERRO", f"Exceção gerar PIX: {e}")
+            return False, None, f"Erro de conexão: {str(e)[:80]}"
+
+    async def verif_pag(pid):
+        url = f"https://api.mercadopago.com/v1/payments/{pid}"
+        headers = {"Authorization": f"Bearer {mp_token}"}
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200:
+                d = r.json()
+                return d.get("status"), d.get("transaction_amount", 0)
+            return "error", 0
+        except Exception as e:
+            log(nome_bot, "ERRO", f"Exceção verificar PIX: {e}")
+            return "error", 0
+
+    async def liberar_acesso(uid, val, user_obj, q_msg, ctx):
+        val = round(val, 2)
+        plano = planos_usar.get(val)
+        if not plano:
+            log(nome_bot, "ERRO", f"❌ PLANO NÃO EXISTE — Valor R$ {val:.2f}")
+            await q_msg.reply_text("❌ Esse plano não existe mais.")
+            return
+        seg, nome, grupo_id, grupo_link = plano
+        uid = str(uid)
+        
+        tempo_expira = time.time() + seg if seg < 3153600000 else 3153600000
+        username = f"@{user_obj.username}" if user_obj.username else "Sem @"
+        data_compra = time.time()
+        
+        clientes_atual = carregar_clientes()
+        clientes_atual[uid] = {
+            "_id": uid,
+            "nome": user_obj.first_name or "Cliente", 
+            "username": username, 
+            "expira_em": tempo_expira,
+            "duracao_segundos": seg,
+            "grupo": grupo_id, 
+            "grupo_link": grupo_link, 
+            "valor_pago": f"{val:.2f}",
+            "data_compra": data_compra
+        }
+        salvar_clientes(clientes_atual)
+        log(nome_bot, "VENDA", f"✅ LIBERADO — User:{uid} Valor:R${val} Plano:{nome}")
+
+        data_compra_rj = formatar_data_rj(data_compra)
+        data_expira_rj = "♾️ VITALÍCIO" if seg >= 3153600000 else formatar_data_rj(tempo_expira)
+
+        if uid in msgs_para_apagar:
+            try: await q_msg.delete_message()
+            except: pass
+            del msgs_para_apagar[uid]
+
+        await q_msg.reply_text(
+            f"✅ PAGAMENTO CONFIRMADO! 🎉\n\n🔗 Entre no grupo:\n👉 {grupo_link}\n\n📅 Compra: {data_compra_rj}\n⏳ Acesso: {data_expira_rj}"
+        )
+
+        try:
+            await ctx.bot.send_message(dono_id,
+                f"🆕 NOVA VENDA!\n👤 Cliente: {user_obj.first_name or 'Sem nome'}\n📱 Usuario: @{user_obj.username if user_obj.username else 'Sem @'}\n🆔 ID: {uid}\n💰 Valor: R$ {val:.2f}\n👥 Grupo: {grupo_link}\n📅 Data: {data_compra_rj}\n⏳ Acesso: {data_expira_rj}")
+        except Exception as e:
+            log(nome_bot, "ERRO", f"Não notificou dono: {e}")
+
+    async def botoes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        q = update.callback_query
+        d = q.data
+        uid = str(update.effective_user.id)
+        user = update.effective_user
+
+        if esta_bloqueado(uid):
+            if not aviso_ja_enviado(uid):
+                await q.message.reply_text(MENSAGEM_BLOQUEADO)
+            await q.answer()
+            raise ApplicationHandlerStop
+
+        if d.startswith("comprar_"):
+            v = float(d.split("_")[1])
+            
+            try:
+                await q.message.delete()
             except:
                 pass
-        user = update.effective_user
-        ok, pag_id, qr = await gerar_pagamento(valor, user, context.bot)
-        if ok:
-            msg_completa = (
-                "PIX Gerado com Sucesso!\n\n"
-                f"Valor: R$ {valor:.2f}\n\n"
-                f"Codigo Pix Copia e Cola:\n{qr}"
-            )
-            keyboard_final = [
-                [InlineKeyboardButton("Copiar Codigo Pix", copy_text=dict(text=qr))],
-                [InlineKeyboardButton("Verificar Pagamento", callback_data=f"check_{pag_id}")]
-            ]
-            await query.message.reply_text(msg_completa, reply_markup=InlineKeyboardMarkup(keyboard_final))
-        else:
-            await query.message.reply_text(f"Erro ao gerar o Pix:\n{qr}")
 
-    elif dados.startswith("check_"):
-        payment_id = dados.split("_")[1]
-        aprovado, valor_pago = await verificar_pagamento(payment_id)
-        if aprovado:
-            await query.answer("Pagamento Aprovado!", show_alert=True)
-            if abs(valor_pago - 1.00) < 0.01:
-                duracao_segundos = 3600
-                nome_plano = "1 Hora"
-            elif abs(valor_pago - 5.00) < 0.01:
-                duracao_segundos = 86400
-                nome_plano = "1 Dia"
-            elif abs(valor_pago - 10.00) < 0.01:
-                duracao_segundos = 86400 * 7
-                nome_plano = "1 Semana"
-            elif abs(valor_pago - 30.00) < 0.01:
-                duracao_segundos = 86400 * 30
-                nome_plano = "1 Mes"
-            elif abs(valor_pago - 55.00) < 0.01:
-                duracao_segundos = 86400 * 365 * 10
-                nome_plano = "Permanente"
-            else:
-                duracao_segundos = int(valor_pago) * 86400
-                nome_plano = f"R$ {valor_pago:.2f}"
-            user_id = update.effective_user.id
-            tempo_expiracao = time.time() + duracao_segundos
-            user_obj = update.effective_user
-            username = f"@{user_obj.username}" if user_obj.username else "Sem @"
-            data_compra = time.time()
-            collection_clientes.update_one(
-                {"user_id": user_id},
-                {
-                    "$set": {
-                        "user_id": user_id,
-                        "nome": user_obj.first_name or "Cliente",
-                        "username": username,
-                        "expira_em": tempo_expiracao,
-                        "valor_pago": f"{valor_pago:.2f}",
-                        "data_compra": data_compra,
-                        "aviso_1dia_enviado": False,
-                        "aviso_20min_enviado": False
-                    }
-                },
-                upsert=True
-            )
-            link_convite = None
-            if CANAL_ALVO_ID != 0:
-                try:
-                    convite = await context.bot.create_chat_invite_link(
-                        chat_id=CANAL_ALVO_ID,
-                        member_limit=1,
-                        expire_date=int(time.time()) + 86400
-                    )
-                    link_convite = convite.invite_link
-                except Exception as e:
-                    print(f"Erro ao gerar link: {e}")
-            texto_link = f"Aqui esta o seu link:\n{link_convite}" if link_convite else "Contate o suporte @Lyhhxv"
-            data_compra_rj = formatar_data_rj(data_compra)
-            data_expira_rj = "Permanente" if nome_plano == "Permanente" else formatar_data_rj(tempo_expiracao)
-            await query.message.reply_text(
-                f"Pagamento Aprovado!\n\n"
-                f"Plano: {nome_plano}\n"
-                f"Valor: R$ {valor_pago:.2f}\n\n{texto_link}\n\n"
-                f"Aproveite o grupo🤭🩷"
-            )
-            if payment_id not in pagamentos_notificados:
-                pagamentos_notificados.add(payment_id)
-                comprador = update.effective_user
-                relatorio = (
-                    "NOVA ASSINATURA CONFIRMADA!\n\n"
-                    f"Cliente: {comprador.first_name or 'Sem nome'}\n"
-                    f"Usuario: @{comprador.username if comprador.username else 'Sem @'}\n"
-                    f"ID: {comprador.id}\n"
-                    f"Valor: R$ {valor_pago:.2f}\n"
-                    f"Plano: {nome_plano}\n"
-                    f"Pagamento em: {data_compra_rj}\n"
-                    f"Expira em: {data_expira_rj}"
+            ok, pid, qr = await gerar_pag(v, user)
+            if ok:
+                kb = [
+                    [InlineKeyboardButton("📋 Copiar Código", copy_text=CopyTextButton(qr))],
+                    [InlineKeyboardButton("✅ Verificar Pagamento", callback_data=f"check_{pid}_{v}")],
+                    [InlineKeyboardButton("⬅️ Voltar", callback_data="voltar")]
+                ]
+                msg = await q.message.reply_text(
+                    f"✅ PIX GERADO!\n\n💰 Valor: R$ {v:.2f}\n📋 Código Pix:\n{qr}\n\n⏰ Pague em até 10 minutos!",
+                    reply_markup=InlineKeyboardMarkup(kb)
                 )
+                msgs_para_apagar[uid] = msg.message_id
+                log(nome_bot, "USUARIO", f"PIX gerado — User:{uid} Valor:R${v} PID:{pid}")
+            else:
+                await q.message.reply_text(f"❌ {qr}")
+            return
+
+        elif d.startswith("check_"):
+            partes = d.split("_")
+            pid = partes[1]
+            valor_esperado = float(partes[2]) if len(partes) > 2 else 0
+            
+            status, val_pago = await verif_pag(pid)
+            
+            if status == "approved":
+                if abs(val_pago - valor_esperado) > 0.01:
+                    await q.answer("⚠️ VALOR ERRADO!", show_alert=True)
+                    await q.message.reply_text(
+                        f"❌ PAGAMENTO COM VALOR DIFERENTE!\n\n"
+                        f"Você pagou: R$ {val_pago:.2f}\n"
+                        f"Valor do plano: R$ {valor_esperado:.2f}\n\n"
+                        f"Pague o valor EXATO ou fale com o suporte."
+                    )
+                    return
+
+                await q.answer("✅ PAGAMENTO APROVADO!", show_alert=True)
+                await liberar_acesso(uid, valor_esperado, user, q.message, ctx)
+
+            elif status == "pending":
+                await q.answer("⏳ PENDENTE", show_alert=True)
+                await q.message.reply_text("⏳ Ainda não identificado. Clique novamente em instantes.")
+            else:
+                await q.answer("❌ NÃO APROVADO", show_alert=True)
+                await q.message.reply_text(f"❌ Status: {status}")
+            return
+
+        elif d == "voltar":
+            if uid in msgs_para_apagar:
                 try:
-                    await context.bot.send_message(chat_id=DONO_ID, text=relatorio)
+                    await ctx.bot.delete_message(chat_id=q.message.chat_id, message_id=msgs_para_apagar[uid])
+                except:
+                    try:
+                        await q.message.delete()
+                    except:
+                        pass
+                del msgs_para_apagar[uid]
+            else:
+                try:
+                    await q.message.delete()
                 except:
                     pass
-        else:
-            await query.answer("Pagamento ainda nao identificado!", show_alert=True)
-            await query.message.reply_text(
-                "Pagamento ainda nao identificado! Pague e aguarde, ou clique novamente."
-            )
 
-    elif dados == "renovar_5.00":
-        query.data = "comprar_5.00"
-        await button_handler(update, context)
-    elif dados == "ver_outros_precos":
-        keyboard = [
-            [InlineKeyboardButton("1 HORA -> R$ 1,00", callback_data="comprar_1.00")],
-            [InlineKeyboardButton("1 Dia -> R$ 5,00", callback_data="comprar_5.00")],
-            [InlineKeyboardButton("1 Semana -> R$ 10,00", callback_data="comprar_10.00")],
-            [InlineKeyboardButton("1 Mes -> R$ 30,00", callback_data="comprar_30.00")],
-            [InlineKeyboardButton("Permanente -> R$ 55,00", callback_data="comprar_55.00")]
-        ]
-        await query.message.reply_text("Escolha outro plano:", reply_markup=InlineKeyboardMarkup(keyboard))
+            kb = []
+            for valor, (seg, nome_plano, grupo_id, grupo_link) in planos_usar.items():
+                kb.append([InlineKeyboardButton(f"{nome_plano} -> R$ {valor:.2f}", callback_data=f"comprar_{valor}")])
+            kb.append([InlineKeyboardButton("📌 𝑷𝑹𝑬𝑽𝑰𝑨𝑺 𝑮𝑹𝑨𝑻𝑰𝑺 🔥", url="https://t.me/+zL_k2splzuZiYTUx")])
+            mid = random.choice(lista_midias) if lista_midias else None
+            await enviar_midia(ctx.bot, int(uid), mid, mensagem_inicial, InlineKeyboardMarkup(kb))
+            return
 
-async def gerenciador_assinaturas(application):
-    await asyncio.sleep(10)
+    async def gerenciador_loop(app):
+        if not is_principal: return
+        while True:
+            verificar_wifi()
+            try:
+                await expurgar_expirados(app.bot)
+            except Exception as e:
+                log(nome_bot, "ERRO", f"Erro no loop: {e}")
+            gc.collect()
+            await asyncio.sleep(300)
+
+    verificar_wifi()
+
+    try:
+        app = ApplicationBuilder() \
+            .token(token) \
+            .connect_timeout(30.0) \
+            .read_timeout(30.0) \
+            .write_timeout(30.0) \
+            .pool_timeout(20.0) \
+            .build()
+
+        app.add_handler(TypeHandler(Update, interceptar), group=-1)
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), log_mensagens), group=0)
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("meu_id", meu_id_cmd))
+        app.add_handler(CommandHandler("suporte", suporte_cmd))
+        app.add_handler(CommandHandler("suport", suporte_cmd))
+        app.add_handler(CommandHandler("pegarid", pegarid_cmd))
+        app.add_handler(CommandHandler("clientes", clientes_cmd))
+        app.add_handler(CommandHandler("clt", clientes_cmd))
+        app.add_handler(CommandHandler("block", block_cmd))
+        app.add_handler(CommandHandler("desbloquear", desbloquear_cmd))
+        app.add_handler(CommandHandler("div", div_cmd))
+        app.add_handler(CommandHandler("div2", div2_cmd))
+        app.add_handler(CommandHandler("menu", menu_cmd))
+        app.add_handler(CallbackQueryHandler(botoes))
+        
+        if is_principal and GRUPO_VIP is not None:
+            app.add_handler(ChatMemberHandler(monitorar_entradas, ChatMemberHandler.CHAT_MEMBER))
+            app.add_handler(ChatJoinRequestHandler(aprovar_solicitacao))
+
+        log(nome_bot, "SISTEMA", "✅ BOT ONLINE!")
+        await app.initialize()
+        await app.start()
+        
+        if is_principal:
+            try:
+                await expurgar_expirados(app.bot)
+            except Exception as e:
+                log(nome_bot, "ERRO", f"Erro inicial: {e}")
+            asyncio.create_task(gerenciador_loop(app))
+
+        allowed = ["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
+        await app.updater.start_polling(drop_pending_updates=False, allowed_updates=allowed)
+        while True:
+            verificar_wifi()
+            await asyncio.sleep(60)
+    except Exception as e:
+        log(nome_bot, "ERRO", f"❌ FALHA: {e}")
+        return
+
+async def main():
+    print("\n" + "="*60)
+    print("LIGANDO...")
+    print("="*60 + "\n")
+
+    for idx, bot_cfg in enumerate(BOTS_CONFIG):
+        if idx > 0:
+            await asyncio.sleep(3)      
+        eh_principal = (idx == 0)
+        log("MAIN", "SISTEMA", f"🚀 INICIANDO {bot_cfg['nome']}...")
+        asyncio.create_task(criar_e_iniciar_bot(bot_cfg, is_principal=eh_principal))
     while True:
-        try:
-            agora = time.time()
-            clientes = collection_clientes.find({})
-            for cliente in clientes:
-                user_id = cliente["user_id"]
-                expira_em = cliente["expira_em"]
-                tempo_restante = expira_em - agora
-                if 82800 <= tempo_restante <= 86400 and not cliente.get("aviso_1dia_enviado", False):
-                    try:
-                        msg = "SEU PLANO VENCE AMANHA! Renove agora!"
-                        keyboard = [
-                            [InlineKeyboardButton("Renovar 1H R$1,00", callback_data="comprar_1.00")],
-                            [InlineKeyboardButton("Renovar 1Dia R$5,00", callback_data="renovar_5.00")],
-                            [InlineKeyboardButton("Outros Planos", callback_data="ver_outros_precos")]
-                        ]
-                        await application.bot.send_message(chat_id=user_id, text=msg, reply_markup=InlineKeyboardMarkup(keyboard))
-                        collection_clientes.update_one({"user_id": user_id}, {"$set": {"aviso_1dia_enviado": True}})
-                    except:
-                        pass
-                elif 0 < tempo_restante <= 1200 and not cliente.get("aviso_20min_enviado", False):
-                    try:
-                        msg = "SEU PLANO EXPIRA EM MINUTOS! Renove AGORA!"
-                        keyboard = [
-                            [InlineKeyboardButton("Renovar 1H R$1,00", callback_data="comprar_1.00")],
-                            [InlineKeyboardButton("Renovar 1Dia R$5,00", callback_data="renovar_5.00")],
-                            [InlineKeyboardButton("Outros Planos", callback_data="ver_outros_precos")]
-                        ]
-                        await application.bot.send_message(chat_id=user_id, text=msg, reply_markup=InlineKeyboardMarkup(keyboard))
-                        collection_clientes.update_one({"user_id": user_id}, {"$set": {"aviso_20min_enviado": True}})
-                    except:
-                        pass
-                elif tempo_restante <= 0 and CANAL_ALVO_ID != 0:
-                    try:
-                        await application.bot.ban_chat_member(chat_id=CANAL_ALVO_ID, user_id=user_id)
-                        await application.bot.unban_chat_member(chat_id=CANAL_ALVO_ID, user_id=user_id)
-                        await application.bot.send_message(
-                            chat_id=user_id,
-                            text="Seu plano expirou! Use /start e compre um novo."
-                        )
-                    except:
-                        pass
-                    collection_clientes.delete_one({"user_id": user_id})
-        except Exception as e:
-            print(f"Erro gerenciador: {e}")
-        await asyncio.sleep(60)
-
-def run_background_loop(application):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(gerenciador_assinaturas(application))
-
-def main():
-    threading.Thread(target=run_web, daemon=True).start()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    threading.Thread(target=run_background_loop, args=(app,), daemon=True).start()
-    app.add_handler(TypeHandler(Update, interceptador_universal), group=-1)
-    # Adiciona o handler do bloqueio
-    app.add_handler(ChatMemberHandler(bloquear_nao_pagantes))
-    app.add_handler(ChatMemberHandler(verificar_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("suporte", suporte_cmd))
-    app.add_handler(CommandHandler("suport", suporte_cmd))
-    app.add_handler(CommandHandler("id", id_cmd))
-    app.add_handler(CommandHandler("ping", ping_cmd))
-    app.add_handler(CommandHandler("pegarid", pegarid_cmd))
-    app.add_handler(CommandHandler("clientes", clientes_cmd))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("BOT ONLINE — BLOQUEIO DE ENTRADA ATIVO!")
-    app.run_polling(drop_pending_updates=False)
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    while True:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("\n⏹️ Encerrado")
+            break
+        except Exception as e:
+            print(f"\n🔄 REINICIANDO... Erro: {e}")
+            time.sleep(5)
