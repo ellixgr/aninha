@@ -11,7 +11,7 @@ import socket
 import gc
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # --- SERVIDOR HTTP KEEP-ALIVE PARA O RENDER ---
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -52,10 +52,84 @@ from telegram.ext import (
     ChatJoinRequestHandler, MessageHandler, filters
 )
 from pymongo import MongoClient
-from config import (
-    BOTS_CONFIG, GRUPO_VIP, GRUPO_VIP_LINK,
-    FUSO_RJ, PLANOS_VIP_APENAS, MENSAGEM_VIP
-)
+
+# ==============================================
+# ⚙️ CONFIGURAÇÕES GLOBAIS VIA VARIÁVEIS DE AMBIENTE
+# ==============================================
+FUSO_RJ = timezone(timedelta(hours=-3))
+
+GRUPO_VIP = int(os.getenv("GRUPO_VIP", "-1004377588572"))
+GRUPO_VIP_LINK = os.getenv("GRUPO_VIP_LINK", "https://t.me/+3flFzJUeyCA0M2Rh")
+
+GRUPO_ANUAL_ID = int(os.getenv("GRUPO_ANUAL_ID", "-1004377588572"))
+GRUPO_ANUAL_LINK = os.getenv("GRUPO_ANUAL_LINK", "https://t.me/+3flFzJUeyCA0M2Rh")
+
+DONO_ID_GLOBAL = int(os.getenv("DONO_ID", "7711945457"))
+MP_TOKEN_COMUM = os.getenv("MP_TOKEN", "")
+
+# Planos configurados (com os valores atualizados: 7.00 e 12.00)
+PLANOS_VIP_APENAS = {
+    7.00:  (3600,     "⏳ 𝗩𝗜𝗣 𝗣𝗢𝗥 1 𝗛𝗢𝗥𝗔🔥",     GRUPO_VIP, GRUPO_VIP_LINK),
+    12.00: (604800,   "📅 𝗩𝗜𝗣 𝗣𝗢𝗥 7 𝗗𝗜𝗔𝗦🔥🔥 (recomendado)",   GRUPO_VIP, GRUPO_VIP_LINK),
+    29.90: (2592000,  "🗓️ 𝗩𝗜𝗣 𝗣𝗢𝗥 30 𝗗𝗜𝗔𝗦",      GRUPO_VIP, GRUPO_VIP_LINK),
+    89.50: (31536000, "💎 𝗔𝗡𝗨𝗔𝗟 (𝗠𝗶𝗱𝗶𝗮𝘀 𝗿𝗮𝗿𝗮𝘀🤫𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱𝘀 𝗹𝗶𝗯𝗲𝗿𝗮𝗱𝗼𝘀)", GRUPO_ANUAL_ID, GRUPO_ANUAL_LINK),
+}
+
+MENSAGEM_VIP = """‼️⚠️*ACESSO TOTALMENTE ANÔNIMO(A)*⚠️‼️
+
+🔐 _+100 MIL MÍDIAS LIBERADAS_
+🔥 _Conteúdos que viralizam e somem da internet_
+💀 _Mídias raras e difíceis de encontrar_
+🕯️ _Atualização constante_
+📥 _Downloads liberados_
+💋 _Famosas / Privacy / OnlyFans_
+🫦 _Exclusivos selecionados_
+
+👇 💎*Escolha seu plano, você não vai se arrepender*🤭🔥:"""
+
+# Mídias embutidas para cada bot
+MIDIAS_BOT_1 = [
+    "BAACAgEAAxkBAAINMWqHwstKPaNAoevtH_C8vbgx2rOiAAJ2BwAC2VFARLNksipNqGaVPQQ",
+    "BAACAgEAAxkBAAINMmqHxQWRoW4M8dIocXIJgzoq6oDxAAJ6BwAC2VFARNbkIeRitsobPQQ",
+    "BAACAgEAAxkBAAIUDGrSz4pByMyV8sm_i0CJKnA5CkK1AAJyDAACzV2ZRkBg1G5t867OPQQ",
+    "BAACAgEAAxkBAAINNWqHxVapytBukUr0UbHZoVMnMtCzAALcBwACzV1ARIc0KzsoKhW8PQQ",
+    "BAACAgEAAxkBAAIUD2rSz8xZKBNu8cUentRF-YsUssLKAAJ1DAACzV2ZRtezbZ__AivpPQQ",
+    "BAACAgEAAxkBAAINamqHy2e_9QW8g064XL7HT671TR65AALvBwACzV1ARP2qWDrr3XeMPQQ",
+    "BAACAgEAAxkBAAINN2qHxV1kw7CeT84jo3U7enhsXlJsAALdBwACzV1ARGiyDRO-vaSuPQQ",
+    "BAACAgEAAxkBAAINM2qHxRhPrYP4wdJ6puHPGvfyc6LlAALbBwACzV1ARPSF-QtVJV2KPQQ",
+    "BAACAgEAAxkBAAITtmrQ68aRSdvkX5WtIrETIc2-YrzrAALzCQACXTaJRqgDXHnOvjdzPQQ",
+    "BAACAgEAAxkBAAIT62rSsiXwo8GvKgZKKNcSdhr6tRD2AALJCAACzV2RRsZGE79YbpNQPQQ",
+    "BAACAgEAAxkBAAINNGqHxSYxz1SW7HILTo4B5aDSKTG3AAJ4BwAC2VFARDdsbR7JH0ouPQQ"
+]
+
+MIDIAS_BOT_2 = [
+    "BAACAgEAAxkBAAIBf2qHvh2A0w5UFXjXg9vd2xF_eLOsAAJ2BwAC2VFARDvn3nM8HjNGPQQ",
+    "BAACAgEAAxkBAAIBgmqHviyF2CvcncX5wXtqlwABBfJfOgACdwcAAtlRQEQLGGpSxnBPoz0E",
+    "BAACAgEAAxkBAAIHJ2rQ7ARwYC81Om5g3zaOycYlPHEOAALzCQACXTaJRo1YsQABqhWLPj0E",
+    "BAACAgEAAxkBAAIHTWrS0AFRpf00vo4w-gMF-oUTWmr4AAJyDAACzV2ZRubJqV-8F7FrPQQ",
+    "BAACAgEAAxkBAAIHTmrS0AHF6FSKjFm6WDdTMDEBBNLWAAJ1DAACzV2ZRlXfbFi56qDVPQQ",
+    "BAACAgEAAxkBAAIBhWqHvkvf21dcbMJhpFyVhpyzW5wUAAJ4BwAC2VFARCEHXfNOYOsvPQQ",
+    "BAACAgEAAxkBAAIBiGqHvmtYYPvoaGrMiTYbJJ0vNNsfAAJ6BwAC2VFARGpx61vQSwGpPQQ"
+]
+
+BOTS_CONFIG = [
+    {
+        "nome": "aninha",
+        "token": os.getenv("BOT_TOKEN_1", ""),
+        "mp_token": MP_TOKEN_COMUM,
+        "dono_id": DONO_ID_GLOBAL,
+        "tipo_plano": "VIP",
+        "midias": MIDIAS_BOT_1
+    },
+    {
+        "nome": "xay",
+        "token": os.getenv("BOT_TOKEN_2", ""),
+        "mp_token": MP_TOKEN_COMUM,
+        "dono_id": DONO_ID_GLOBAL,
+        "tipo_plano": "VIP",
+        "midias": MIDIAS_BOT_2
+    }
+]
 
 # ==============================================
 # 🔗 CONEXÃO COM O MONGODB (VIA VARIÁVEL DE AMBIENTE)
@@ -196,6 +270,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
     dono_id = bot_cfg["dono_id"]
     lista_midias = bot_cfg["midias"]
     nome_bot = bot_cfg["nome"]    
+    
     planos_usar = PLANOS_VIP_APENAS
     mensagem_inicial = MENSAGEM_VIP
     ULTIMO_COMANDO = {}
@@ -218,7 +293,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
             dados_db = colecao_sistema.find_one({"_id": "controle_uptime"})
             mes_registrado = dados_db.get("mes", mes_atual_str) if dados_db else mes_atual_str
             
-            # Se mudou o mês (virou o mês 1º), reseta o acumulado
             if mes_registrado != mes_atual_str:
                 acumulado_anterior = 0
                 colecao_sistema.update_one(
@@ -231,7 +305,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
 
             total_segundos = acumulado_anterior + sessao_atual
             
-            # Salva de volta atualizado
             colecao_sistema.update_one(
                 {"_id": "controle_uptime"},
                 {"$set": {"acumulado_segundos": total_segundos, "mes": mes_atual_str, "ultimo_salvamento": agora}},
@@ -419,12 +492,10 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         horas_ligado = int(total_segundos // 3600)
         minutos_ligado = int((total_segundos % 3600) // 60)
         
-        # Limite total do Render gratuito: 750 horas por mês
         horas_totais_render = 750
         horas_usadas = total_segundos / 3600
         horas_restantes = max(0, horas_totais_render - horas_usadas)
         
-        # Data/Hora aproximada em que as 750 horas se esgotam
         data_desligamento = datetime.now(FUSO_RJ) + timedelta(seconds=(750 * 3600 - total_segundos))
         data_desligamento_str = data_desligamento.strftime("%d/%m/%Y às %H:%M")
 
@@ -850,7 +921,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         while True:
             verificar_wifi()
             try:
-                obter_tempo_total_ligado() # Atualiza o tempo acumulado no MongoDB periodicamente
+                obter_tempo_total_ligado()
                 await expurgar_expirados(app.bot)
             except Exception as e:
                 log(nome_bot, "ERRO", f"Erro no loop: {e}")
