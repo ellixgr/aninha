@@ -54,20 +54,21 @@ from telegram.ext import (
 from pymongo import MongoClient
 
 # ==============================================
-# ⚙️ CONFIGURAÇÕES GLOBAIS VIA VARIÁVEIS DE AMBIENTE
+# ⚙️ CONFIGURAÇÕES GLOBAIS SEGURAS (VIA VARIÁVEIS DE AMBIENTE)
 # ==============================================
 FUSO_RJ = timezone(timedelta(hours=-3))
 
-GRUPO_VIP = int(os.getenv("GRUPO_VIP", "-1004377588572"))
-GRUPO_VIP_LINK = os.getenv("GRUPO_VIP_LINK", "https://t.me/+3flFzJUeyCA0M2Rh")
+# Puxando absolutamente tudo de forma segura do Render
+GRUPO_VIP = int(os.getenv("GRUPO_VIP", "0"))
+GRUPO_VIP_LINK = os.getenv("GRUPO_VIP_LINK", "")
 
-GRUPO_ANUAL_ID = int(os.getenv("GRUPO_ANUAL_ID", "-1004377588572"))
-GRUPO_ANUAL_LINK = os.getenv("GRUPO_ANUAL_LINK", "https://t.me/+3flFzJUeyCA0M2Rh")
+GRUPO_ANUAL_ID = int(os.getenv("GRUPO_ANUAL_ID", str(GRUPO_VIP)))
+GRUPO_ANUAL_LINK = os.getenv("GRUPO_ANUAL_LINK", GRUPO_VIP_LINK)
 
-DONO_ID_GLOBAL = int(os.getenv("DONO_ID", "7711945457"))
+DONO_ID_GLOBAL = int(os.getenv("DONO_ID", "0"))
 MP_TOKEN_COMUM = os.getenv("MP_TOKEN", "")
 
-# Planos configurados (com os valores atualizados: 7.00 e 12.00)
+# Planos configurados puxando os IDs e links dinamicamente do ambiente (com 7.00 e 12.00)
 PLANOS_VIP_APENAS = {
     7.00:  (3600,     "⏳ 𝗩𝗜𝗣 𝗣𝗢𝗥 1 𝗛𝗢𝗥𝗔🔥",     GRUPO_VIP, GRUPO_VIP_LINK),
     12.00: (604800,   "📅 𝗩𝗜𝗣 𝗣𝗢𝗥 7 𝗗𝗜𝗔𝗦🔥🔥 (recomendado)",   GRUPO_VIP, GRUPO_VIP_LINK),
@@ -87,7 +88,7 @@ MENSAGEM_VIP = """‼️⚠️*ACESSO TOTALMENTE ANÔNIMO(A)*⚠️‼️
 
 👇 💎*Escolha seu plano, você não vai se arrepender*🤭🔥:"""
 
-# Mídias embutidas para cada bot
+# Mídias embutidas (IDs seguros de mídias do Telegram)
 MIDIAS_BOT_1 = [
     "BAACAgEAAxkBAAINMWqHwstKPaNAoevtH_C8vbgx2rOiAAJ2BwAC2VFARLNksipNqGaVPQQ",
     "BAACAgEAAxkBAAINMmqHxQWRoW4M8dIocXIJgzoq6oDxAAJ6BwAC2VFARNbkIeRitsobPQQ",
