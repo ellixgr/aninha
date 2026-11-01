@@ -288,9 +288,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         mid = random.choice(lista_midias) if lista_midias else None
         await enviar_midia(update.message, update.effective_chat.id, mid, mensagem_inicial, InlineKeyboardMarkup(kb))
 
-    # ==============================================
-    # 📋 FUNÇÃO DO COMANDO /MENU (EXIBE TODOS OS COMANDOS E SUAS FUNÇÕES)
-    # ==============================================
     async def menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
         texto_menu = (
@@ -302,7 +299,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
             "• `/add ID` — Adiciona VIP manualmente ao usuário (abre botões para escolher o tempo: 1h, 7d, 30d ou Vitalício).\n"
             "• `/tirarvip ID` — Remove o status VIP e o cadastro do usuário do banco.\n"
             "• `/tirargrupo ID` — Bane e remove imediatamente o usuário do grupo VIP do Telegram.\n"
-            "• `/enviarconvite` — Envia link do novo grupo para os clientes ativos que saíram, mantendo o histórico de tempo de onde pararam.\n"
+            "• `/enviarconvite` — Varre os clientes ativos, confirma quem está fora do grupo atual e **envia o link novo**, mantendo o histórico!\n"
             "• `/clientes` (ou `/clt`) — Lista todos os clientes ativos com detalhes de tempo restante e valores.\n\n"
             "📢 **Divulgação Automática:**\n"
             "• `/div` — Responda a uma foto/vídeo para disparar a divulgação padrão para o canal.\n"
@@ -391,35 +388,56 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         except Exception as e:
             await update.message.reply_text(f"❌ Erro ao remover do grupo: {e}")
 
+    # --- COMANDO /enviarconvite CORRIGIDO E FORÇADO ---
     async def enviarconvite_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
-        msg_status = await update.message.reply_text("🔄 Verificando clientes ativos e enviando convites...")
+        if not GRUPO_VIP or not GRUPO_VIP_LINK:
+            await update.message.reply_text("❌ ERRO: GRUPO_VIP ou GRUPO_VIP_LINK não configurados nas variáveis de ambiente do Render!")
+            return
+
+        msg_status = await update.message.reply_text("🔄 Verificando lista de clientes ativos e enviando o link novo...")
         clientes_atual = carregar_clientes()
         enviados = 0
+        erros = 0
         
         for uid_str, cli in clientes_atual.items():
-            if not eh_ativo(uid_str, clientes_atual): continue
+            if not eh_ativo(uid_str, clientes_atual): 
+                continue
+            
+            esta_no_grupo = False
             try:
+                # Verifica se o membro está no grupo atual do Render
                 member = await ctx.bot.get_chat_member(chat_id=GRUPO_VIP, user_id=int(uid_str))
-                if member.status in ['left', 'kicked']: raise Exception()
-            except:
+                # Se o status for membro, administrador ou criador, ele ESTÁ no grupo
+                if member.status in ['member', 'administrator', 'creator']:
+                    esta_no_grupo = True
+            except Exception as e:
+                # Se der erro (ex: bot não é admin do grupo para ver membros, ou usuário bloqueou o bot, ou saiu)
+                # O bloco abaixo trata o envio com segurança
+                esta_no_grupo = False
+
+            # Se NÃO estiver no grupo atual, envia o link novo mantendo o histórico de tempo!
+            if not esta_no_grupo:
                 try:
                     expira_em = cli.get("expira_em", 0)
                     restante = expira_em - time.time()
                     tempo_str = formatar_tempo_restante(restante)
+                    
                     await ctx.bot.send_message(
                         chat_id=int(uid_str),
                         text=f"⚠️ **Olá! Notamos que você não está no nosso grupo VIP atual.**\n\n"
-                             f"Seu histórico foi mantido de onde parou!\n"
+                             f"Seu histórico foi mantido exatamente de onde parou!\n"
                              f"⏳ Seu tempo restante: **{tempo_str}**\n\n"
-                             f"🔗 Entre no grupo oficial:\n👉 {GRUPO_VIP_LINK}",
+                             f"🔗 Entre no nosso grupo oficial atualizado:\n👉 {GRUPO_VIP_LINK}",
                         parse_mode="Markdown"
                     )
                     enviados += 1
-                    await asyncio.sleep(0.5)
-                except: pass
+                    await asyncio.sleep(0.5) # Pausa curta para evitar Flood do Telegram
+                except Exception as ex:
+                    erros += 1
+                    log(nome_bot, "ERRO", f"Não foi possível enviar mensagem para o ID {uid_str}: {ex}")
 
-        await msg_status.edit_text(f"✅ Processo concluído!\nConvites enviados para `{enviados}` clientes ativos que não estavam no grupo.", parse_mode="Markdown")
+        await msg_status.edit_text(f"✅ **Processo Concluído!**\n\n📨 Convites enviados com sucesso: `{enviados}`\n❌ Falhas (usuários que bloquearam o bot): `{erros}`", parse_mode="Markdown")
 
     async def clientes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
@@ -433,7 +451,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
             expira_em = cli.get("expira_em", 0)
             tempo_str = "♾️ VITALÍCIO" if expira_em >= 3153600000 else formatar_tempo_restante(expira_em - agora)
             data_limite = formatar_data_rj(expira_em)
-            texto += f"🔹 {idx}. {cli.get('nome', 'Sem nome')}\n🆔 ID: {uid}\n👤 Usuário: {cli.get('username', 'Sem @')}\n💰 Valor: R$ {cli.get('valor_pago', 'Manual')}\n📅 Compra: {formatar_data_rj(cli.get('data_compra', time.time()))}\n⏳ Restante: {tempo_str}\n📆 Expira: {data_limite}\n👥 Grupo: {cli.get('grupo_link', GRUPO_VIP_LINK)}\n\n"
+            texto += f"🔹 {idx}. {cli.get('nome', 'Sem nome')}\n🆔 ID: {uid}\n👤 Usuário: {cli.get('username', 'Sem @')}\n💰 Valor: R$ {cli.get('valor_pago', 'Manual')}\n📅 Compra: {formatar_data_rj(cli.get('data_compra', time.time()))}\n⏳ Restante: {tempo_str}\n📆 Expira: {data_limite}\n👥 Grupo: {GRUPO_VIP_LINK}\n\n"
         await update.message.reply_text(texto)
 
     async def gerar_pag(valor, user):
@@ -556,7 +574,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         app = ApplicationBuilder().token(token).build()
         app.add_handler(TypeHandler(Update, interceptar), group=-1)
         
-        # 📋 REGISTRO DE TODOS OS COMANDOS DO BOT (INCLUINDO O /menu)
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("menu", menu_cmd))
         app.add_handler(CommandHandler("mongo", mongo_cmd))
@@ -567,7 +584,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         app.add_handler(CommandHandler("enviarconvite", enviarconvite_cmd))
         app.add_handler(CommandHandler("clientes", clientes_cmd))
         app.add_handler(CommandHandler("clt", clientes_cmd))
-        
         app.add_handler(CallbackQueryHandler(botoes))
         
         if is_principal and GRUPO_VIP:
