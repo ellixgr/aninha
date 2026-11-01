@@ -388,7 +388,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         except Exception as e:
             await update.message.reply_text(f"❌ Erro ao remover do grupo: {e}")
 
-    # --- COMANDO /enviarconvite CORRIGIDO E FORÇADO ---
+    # --- COMANDO /enviarconvite CORRIGIDO E BLINDADO CONTRA EXCEÇÕES ---
     async def enviarconvite_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
         if not GRUPO_VIP or not GRUPO_VIP_LINK:
@@ -404,19 +404,18 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
             if not eh_ativo(uid_str, clientes_atual): 
                 continue
             
+            # Se o ID for o próprio dono, pula a verificação
+            if int(uid_str) == dono_id:
+                continue
+
             esta_no_grupo = False
             try:
-                # Verifica se o membro está no grupo atual do Render
                 member = await ctx.bot.get_chat_member(chat_id=GRUPO_VIP, user_id=int(uid_str))
-                # Se o status for membro, administrador ou criador, ele ESTÁ no grupo
                 if member.status in ['member', 'administrator', 'creator']:
                     esta_no_grupo = True
-            except Exception as e:
-                # Se der erro (ex: bot não é admin do grupo para ver membros, ou usuário bloqueou o bot, ou saiu)
-                # O bloco abaixo trata o envio com segurança
+            except:
                 esta_no_grupo = False
 
-            # Se NÃO estiver no grupo atual, envia o link novo mantendo o histórico de tempo!
             if not esta_no_grupo:
                 try:
                     expira_em = cli.get("expira_em", 0)
@@ -432,7 +431,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
                         parse_mode="Markdown"
                     )
                     enviados += 1
-                    await asyncio.sleep(0.5) # Pausa curta para evitar Flood do Telegram
+                    await asyncio.sleep(0.5)
                 except Exception as ex:
                     erros += 1
                     log(nome_bot, "ERRO", f"Não foi possível enviar mensagem para o ID {uid_str}: {ex}")
@@ -574,6 +573,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         app = ApplicationBuilder().token(token).build()
         app.add_handler(TypeHandler(Update, interceptar), group=-1)
         
+        # 📋 REGISTRO DE TODOS OS COMANDOS DO BOT
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("menu", menu_cmd))
         app.add_handler(CommandHandler("mongo", mongo_cmd))
