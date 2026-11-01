@@ -103,6 +103,14 @@ BOTS_CONFIG = [
         "dono_id": DONO_ID_GLOBAL,
         "tipo_plano": "VIP",
         "midias": MIDIAS_BOT_1
+    },
+    {
+        "nome": "bot_2",
+        "token": os.getenv("BOT_TOKEN_2", ""),
+        "mp_token": MP_TOKEN_COMUM,
+        "dono_id": DONO_ID_GLOBAL,
+        "tipo_plano": "VIP",
+        "midias": MIDIAS_BOT_2
     }
 ]
 
@@ -602,6 +610,8 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
 
 async def main():
     for idx, bot_cfg in enumerate(BOTS_CONFIG):
+        if not bot_cfg["token"]: 
+            continue
         if idx > 0: await asyncio.sleep(3)      
         asyncio.create_task(criar_e_iniciar_bot(bot_cfg, is_principal=(idx == 0)))
     while True: await asyncio.sleep(3600)
