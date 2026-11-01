@@ -207,9 +207,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
     
     planos_usar = PLANOS_VIP_APENAS
     mensagem_inicial = MENSAGEM_VIP
-    ULTIMO_COMANDO = {}
-    CONTADOR_AVISOS_FLOD = {}
-    msgs_para_apagar = {}
     temp_add_cache = {}
 
     try:
@@ -291,25 +288,44 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         mid = random.choice(lista_midias) if lista_midias else None
         await enviar_midia(update.message, update.effective_chat.id, mid, mensagem_inicial, InlineKeyboardMarkup(kb))
 
-    # --- NOVO COMANDO: /mongo (VERIFICAÇÃO DE MEMÓRIA E LIXOS) ---
+    # ==============================================
+    # 📋 FUNÇÃO DO COMANDO /MENU (EXIBE TODOS OS COMANDOS E SUAS FUNÇÕES)
+    # ==============================================
+    async def menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != dono_id: return
+        texto_menu = (
+            "🤖 **PAINEL DE COMANDOS DO DONO** 👑\n\n"
+            "📊 **Sistema e Banco de Dados:**\n"
+            "• `/mongo` — Verifica o uso atual de RAM e estatísticas do MongoDB.\n"
+            "• `/limparlixo` — Apaga cadastros expirados há mais de 30 dias para otimizar espaço.\n\n"
+            "👥 **Gerenciamento de Clientes e VIPs:**\n"
+            "• `/add ID` — Adiciona VIP manualmente ao usuário (abre botões para escolher o tempo: 1h, 7d, 30d ou Vitalício).\n"
+            "• `/tirarvip ID` — Remove o status VIP e o cadastro do usuário do banco.\n"
+            "• `/tirargrupo ID` — Bane e remove imediatamente o usuário do grupo VIP do Telegram.\n"
+            "• `/enviarconvite` — Envia link do novo grupo para os clientes ativos que saíram, mantendo o histórico de tempo de onde pararam.\n"
+            "• `/clientes` (ou `/clt`) — Lista todos os clientes ativos com detalhes de tempo restante e valores.\n\n"
+            "📢 **Divulgação Automática:**\n"
+            "• `/div` — Responda a uma foto/vídeo para disparar a divulgação padrão para o canal.\n"
+            "• `/div2 [texto]` — Responda a uma foto/vídeo para disparar com texto personalizado.\n\n"
+            "🛠️ **Moderação e Utilitários:**\n"
+            "• `/block ID` — Bloqueia o usuário de interagir com o bot.\n"
+            "• `/desbloquear ID` — Desbloqueia o usuário banido do bot.\n"
+            "• `/ping` — Testa a latência de resposta do bot.\n"
+            "• `/menu` — Exibe esta lista completa de comandos."
+        )
+        await update.message.reply_text(texto_menu, parse_mode="Markdown")
+
     async def mongo_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
-        
-        # Coleta de lixo e RAM
         gc.collect()
         import psutil
         process = psutil.Process(os.getpid())
-        ram_uso = process.memory_info().rss / 1024 / 1024 # em MB
-        
-        # Estatísticas do Mongo
+        ram_uso = process.memory_info().rss / 1024 / 1024
         db_stats = db.command("dbStats")
         tamanho_dados = db_stats.get("dataSize", 0) / 1024 / 1024
         total_clientes = colecao_clientes.count_documents({})
         total_bloqueados = colecao_bloqueados.count_documents({})
-        
-        # Lixos para limpar (Clientes com expiração muito antiga)
-        agora = time.time()
-        expirados_antigos = colecao_clientes.count_documents({"expira_em": {"$lt": agora - 86400 * 30}}) # mais de 30 dias vencidos
+        expirados_antigos = colecao_clientes.count_documents({"expira_em": {"$lt": time.time() - 86400 * 30}})
 
         texto = (
             f"📊 **DIAGNÓSTICO DO SISTEMA & MONGO**\n\n"
@@ -325,11 +341,9 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
 
     async def limparlixo_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
-        agora = time.time()
-        res = colecao_clientes.delete_many({"expira_em": {"$lt": agora - 86400 * 30}})
+        res = colecao_clientes.delete_many({"expira_em": {"$lt": time.time() - 86400 * 30}})
         await update.message.reply_text(f"🧹 **Limpeza Concluída!**\nForam apagados `{res.deleted_count}` registros antigos e expirados do banco de dados.", parse_mode="Markdown")
 
-    # --- NOVO COMANDO: /add COM BOTÕES ---
     async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
         args = ctx.args
@@ -350,7 +364,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         ]
         await update.message.reply_text(f"👤 Adicionando VIP para o ID: `{alvo_id}`\nEscolha o tempo de duração:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-    # --- COMANDOS: /tirarvip E /tirargrupo ---
     async def tirarvip_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
         args = ctx.args
@@ -374,45 +387,37 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         try:
             await ctx.bot.ban_chat_member(chat_id=GRUPO_VIP, user_id=uid)
             await ctx.bot.unban_chat_member(chat_id=GRUPO_VIP, user_id=uid, only_if_banned=True)
-            await update.message.reply_text(f"✅ Usuário `{uid}` foi banido e desbanido (removido) do grupo VIP com sucesso!")
+            await update.message.reply_text(f"✅ Usuário `{uid}` foi removido do grupo VIP com sucesso!")
         except Exception as e:
             await update.message.reply_text(f"❌ Erro ao remover do grupo: {e}")
 
-    # --- NOVO COMANDO: /enviarconvite (RECUPERAÇÃO DE CLIENTES SEM GRUPO) ---
     async def enviarconvite_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
         msg_status = await update.message.reply_text("🔄 Verificando clientes ativos e enviando convites...")
-        
         clientes_atual = carregar_clientes()
         enviados = 0
         
         for uid_str, cli in clientes_atual.items():
-            if not eh_ativo(uid_str, clientes_atual):
-                continue
+            if not eh_ativo(uid_str, clientes_atual): continue
             try:
-                # Verifica se o membro está no grupo atual
                 member = await ctx.bot.get_chat_member(chat_id=GRUPO_VIP, user_id=int(uid_str))
-                if member.status in ['left', 'kicked']:
-                    raise Exception("Não está no grupo")
+                if member.status in ['left', 'kicked']: raise Exception()
             except:
-                # Usuário não está no grupo atual, envia o link mantendo o histórico
                 try:
                     expira_em = cli.get("expira_em", 0)
                     restante = expira_em - time.time()
                     tempo_str = formatar_tempo_restante(restante)
-                    
                     await ctx.bot.send_message(
                         chat_id=int(uid_str),
-                        text=f"⚠️ **Olá! Notamos que você não está no nosso novo grupo VIP.**\n\n"
+                        text=f"⚠️ **Olá! Notamos que você não está no nosso grupo VIP atual.**\n\n"
                              f"Seu histórico foi mantido de onde parou!\n"
                              f"⏳ Seu tempo restante: **{tempo_str}**\n\n"
-                             f"🔗 Entre no novo grupo oficial:\n👉 {GRUPO_VIP_LINK}",
+                             f"🔗 Entre no grupo oficial:\n👉 {GRUPO_VIP_LINK}",
                         parse_mode="Markdown"
                     )
                     enviados += 1
-                    await asyncio.sleep(0.5) # Evita flood no Telegram
-                except Exception as e:
-                    log(nome_bot, "ERRO", f"Falha ao enviar convite para {uid_str}: {e}")
+                    await asyncio.sleep(0.5)
+                except: pass
 
         await msg_status.edit_text(f"✅ Processo concluído!\nConvites enviados para `{enviados}` clientes ativos que não estavam no grupo.", parse_mode="Markdown")
 
@@ -550,7 +555,10 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
     try:
         app = ApplicationBuilder().token(token).build()
         app.add_handler(TypeHandler(Update, interceptar), group=-1)
+        
+        # 📋 REGISTRO DE TODOS OS COMANDOS DO BOT (INCLUINDO O /menu)
         app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("menu", menu_cmd))
         app.add_handler(CommandHandler("mongo", mongo_cmd))
         app.add_handler(CommandHandler("limparlixo", limparlixo_cmd))
         app.add_handler(CommandHandler("add", add_cmd))
@@ -559,6 +567,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         app.add_handler(CommandHandler("enviarconvite", enviarconvite_cmd))
         app.add_handler(CommandHandler("clientes", clientes_cmd))
         app.add_handler(CommandHandler("clt", clientes_cmd))
+        
         app.add_handler(CallbackQueryHandler(botoes))
         
         if is_principal and GRUPO_VIP:
