@@ -12,8 +12,6 @@ import gc
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta, timezone
-
-# --- SERVIDOR HTTP KEEP-ALIVE PARA O RENDER ---
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -29,11 +27,8 @@ def run_keep_alive_server():
     server = HTTPServer(('0.0.0.0', port), SimpleHandler)
     server.serve_forever()
 
-# Iniciar o servidor web em segundo plano para manter o Render acordado
 threading.Thread(target=run_keep_alive_server, daemon=True).start()
 
-
-# --- CONFIGURAÇÃO DE DNS PARA O MONGODB ---
 RESOLV_CONF = "/etc/resolv.conf"
 if not os.path.exists(RESOLV_CONF):
     os.makedirs("/data/data/com.termux/files/usr/etc", exist_ok=True)
@@ -52,23 +47,13 @@ from telegram.ext import (
     ChatJoinRequestHandler, MessageHandler, filters
 )
 from pymongo import MongoClient
-
-# ==============================================
-# ⚙️ CONFIGURAÇÕES GLOBAIS SEGURAS (VIA VARIÁVEIS DE AMBIENTE)
-# ==============================================
 FUSO_RJ = timezone(timedelta(hours=-3))
-
-# Puxando absolutamente tudo de forma segura do Render
 GRUPO_VIP = int(os.getenv("GRUPO_VIP", "0"))
 GRUPO_VIP_LINK = os.getenv("GRUPO_VIP_LINK", "")
-
 GRUPO_ANUAL_ID = int(os.getenv("GRUPO_ANUAL_ID", str(GRUPO_VIP)))
 GRUPO_ANUAL_LINK = os.getenv("GRUPO_ANUAL_LINK", GRUPO_VIP_LINK)
-
 DONO_ID_GLOBAL = int(os.getenv("DONO_ID", "0"))
 MP_TOKEN_COMUM = os.getenv("MP_TOKEN", "")
-
-# Planos configurados puxando os IDs e links dinamicamente do ambiente (com 7.00 e 12.00)
 PLANOS_VIP_APENAS = {
     7.00:  (3600,     "⏳ 𝗩𝗜𝗣 𝗣𝗢𝗥 1 𝗛𝗢𝗥𝗔🔥",     GRUPO_VIP, GRUPO_VIP_LINK),
     12.00: (604800,   "📅 𝗩𝗜𝗣 𝗣𝗢𝗥 7 𝗗𝗜𝗔𝗦🔥🔥 (recomendado)",   GRUPO_VIP, GRUPO_VIP_LINK),
@@ -87,8 +72,6 @@ MENSAGEM_VIP = """‼️⚠️*ACESSO TOTALMENTE ANÔNIMO(A)*⚠️‼️
 🫦 _Exclusivos selecionados_
 
 👇 💎*Escolha seu plano, você não vai se arrepender*🤭🔥:"""
-
-# Mídias embutidas (IDs seguros de mídias do Telegram)
 MIDIAS_BOT_1 = [
     "BAACAgEAAxkBAAINMWqHwstKPaNAoevtH_C8vbgx2rOiAAJ2BwAC2VFARLNksipNqGaVPQQ",
     "BAACAgEAAxkBAAINMmqHxQWRoW4M8dIocXIJgzoq6oDxAAJ6BwAC2VFARNbkIeRitsobPQQ",
@@ -136,9 +119,6 @@ BOTS_CONFIG = [
     }
 ]
 
-# ==============================================
-# 🔗 CONEXÃO COM O MONGODB (VIA VARIÁVEL DE AMBIENTE)
-# ==============================================
 MONGO_URI = os.getenv("MONGO_URI", "")
 
 if not MONGO_URI:
@@ -286,8 +266,7 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
     MAX_AVISOS_FLOD = 5
     TEMPO_BLOQUEIO_FLOD = 600
     msgs_para_apagar = {}
-    
-    # Variáveis de controle de uptime persistente
+   
     tempo_inicio_Sessao = time.time()
     mes_atual_str = datetime.now(FUSO_RJ).strftime("%m-%Y")
 
@@ -614,7 +593,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         )
         await update.message.reply_text(texto_menu)
 
-    # --- NOVOS COMANDOS ADICIONADOS SEM ALTERAR OS ANTIGOS ---
     async def enviarconvite_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != dono_id: return
         if not GRUPO_VIP or not GRUPO_VIP_LINK:
@@ -1045,7 +1023,6 @@ async def criar_e_iniciar_bot(bot_cfg, is_principal=False):
         app.add_handler(CommandHandler("div2", div2_cmd))
         app.add_handler(CommandHandler("menu", menu_cmd))
         
-        # 📋 COMANDOS NOVOS INTEGRADOS PERFEITAMENTE
         app.add_handler(CommandHandler("enviarconvite", enviarconvite_cmd))
         app.add_handler(CommandHandler("mongo", mongo_cmd))
         app.add_handler(CommandHandler("limparlixo", limparlixo_cmd))
